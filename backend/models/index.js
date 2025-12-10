@@ -1,35 +1,55 @@
 const sequelize = require('../config/database');
-const bcrypt = require('bcrypt'); // Import thư viện mã hóa mật khẩu
+const bcrypt = require('bcrypt'); // Nhớ npm install bcrypt
 
-// 1. Import tất cả các Models
+// 1. Import Models
 const Apartment = require('./Apartment');
 const FeeConfig = require('./FeeConfig');
 const Invoice = require('./Invoice');
+const InvoiceItem = require('./InvoiceItem'); // Model mới
 const User = require('./User');
 const UserProfile = require('./UserProfile');
 
-// 2. Thiết lập Mối quan hệ (Associations)
+// 2. Thiết lập Quan hệ (Associations)
 
-// --- Quan hệ 1-1: User và UserProfile ---
-// Khi xóa User -> Xóa luôn Profile (CASCADE)
+// User <-> UserProfile (1-1)
 User.hasOne(UserProfile, { foreignKey: 'userId', onDelete: 'CASCADE' });
 UserProfile.belongsTo(User, { foreignKey: 'userId' });
 
-// --- (Tùy chọn) Quan hệ Căn hộ và Hóa đơn ---
-// Dùng apartment_code để liên kết thay vì ID (theo thiết kế cũ của bạn)
+// Apartment <-> Invoice (1-N)
+// Liên kết bằng 'code' của căn hộ thay vì ID
 Apartment.hasMany(Invoice, { foreignKey: 'apartment_code', sourceKey: 'code' });
 Invoice.belongsTo(Apartment, { foreignKey: 'apartment_code', targetKey: 'code' });
 
-// 3. Hàm đồng bộ Database & Seed dữ liệu mẫu
+// Invoice <-> InvoiceItem (1-N) (QUAN TRỌNG)
+Invoice.hasMany(InvoiceItem, { foreignKey: 'invoiceId', onDelete: 'CASCADE' });
+InvoiceItem.belongsTo(Invoice, { foreignKey: 'invoiceId' });
+
+// 3. Hàm Đồng bộ & Tạo dữ liệu mẫu
 const syncDB = async () => {
     try {
-        // force: true -> DROP TABLE IF EXISTS (Xóa bảng cũ và tạo lại mới tinh)
-        // CẢNH BÁO: Dữ liệu cũ sẽ bị mất sạch!
+        // force: true => Xóa hết bảng cũ tạo lại (Dùng cho lần chạy đầu tiên cấu trúc mới này)
+        // Sau khi chạy ổn định, hãy đổi thành alter: true
         await sequelize.sync({ force: true });
-        console.log('✅ PostgreSQL Database Synced (Force Reset)!');
-        
-        // --- Seed dữ liệu Căn hộ ---
-        // Vì đã force reset nên bảng chắc chắn trống, không cần check count cũng được, nhưng giữ lại cho chắc logic
+        console.log('✅ Database Synced & Optimized Tables Created!');
+
+        // --- Seed Admin ---
+        const userCount = await User.count();
+        if (userCount === 0) {
+            const hashedPassword = await bcrypt.hash('123', 10);
+            const admin = await User.create({
+                username: 'admin',
+                password: hashedPassword,
+                role: 'ADMIN'
+            });
+            await UserProfile.create({
+                userId: admin.id,
+                fullName: 'Quản Trị Viên Hệ Thống',
+                email: 'admin@chungcu.com'
+            });
+            console.log('   -> Seeded Admin User');
+        }
+
+        // --- Seed Căn hộ ---
         const aptCount = await Apartment.count();
         if (aptCount === 0) {
             await Apartment.bulkCreate([
@@ -37,42 +57,32 @@ const syncDB = async () => {
                 { code: 'P102', owner_name: 'Tran Thi B', area: 100 },
                 { code: 'P201', owner_name: 'Le Van C', area: 75 }
             ]);
-            console.log('   -> Đã tạo dữ liệu mẫu: Căn hộ');
+            console.log('   -> Seeded Apartments');
         }
 
-        // --- Seed dữ liệu Admin ---
-        const userCount = await User.count();
-        if (userCount === 0) {
-            // Mã hóa mật khẩu '123' trước khi lưu vào DB
-            const hashedPassword = await bcrypt.hash('123', 10);
-
-            // Tạo 1 tài khoản Admin mẫu
-            const admin = await User.create({
-                username: 'admin',
-                password: hashedPassword, // Lưu mật khẩu đã mã hóa
-                role: 'ADMIN'
-            });
-            
-            // Tạo profile đi kèm
-            await UserProfile.create({
-                userId: admin.id,
-                fullName: 'Quản Trị Viên',
-                email: 'admin@chungcu.com'
-            });
-            console.log('   -> Đã tạo dữ liệu mẫu: User (admin/123 - đã hash)');
+        // --- Seed Phí mẫu ---
+        const feeCount = await FeeConfig.count();
+        if (feeCount === 0) {
+            await FeeConfig.bulkCreate([
+                { name: 'Phí Quản Lý', calc_method: 'PER_M2', unit_price: 7000 },
+                { name: 'Tiền Điện', calc_method: 'PER_UNIT', unit_price: 3500 },
+                { name: 'Tiền Nước', calc_method: 'PER_UNIT', unit_price: 15000 },
+                { name: 'Gửi Xe Máy', calc_method: 'FLAT', unit_price: 120000 },
+            ]);
+            console.log('   -> Seeded Fees');
         }
 
     } catch (error) {
-        console.error('❌ Sync DB Error:', error);
+        console.error('❌ Sync Error:', error);
     }
 };
 
-// 4. Xuất tất cả ra để dùng ở nơi khác
 module.exports = { 
     sequelize, 
     Apartment, 
     FeeConfig, 
     Invoice, 
+    InvoiceItem, 
     User, 
     UserProfile, 
     syncDB 

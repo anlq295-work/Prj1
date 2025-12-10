@@ -6,6 +6,6 @@ const Apartment = sequelize.define('Apartment', {
     code: { type: DataTypes.STRING, allowNull: false, unique: true },
     owner_name: { type: DataTypes.STRING, allowNull: false },
     area: { type: DataTypes.FLOAT, allowNull: false }
-});
+}, { timestamps: true });
 
 module.exports = Apartment;
