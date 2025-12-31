@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { FileText, Send, Search, Filter, X, Eye, PlusCircle } from 'lucide-react';
-import api from '../api'; // File cấu hình axios của bạn
-import RoomBillDetail from './RoomBillDetail'; // Import component chi tiết đã làm ở bước trước
+import { FileText, Send, Search, Filter, X, Eye, PlusCircle, CheckSquare, Square, AlertCircle } from 'lucide-react';
+import api from '../api';
+import RoomBillDetail from '../components/RoomBillDetail'; // Đảm bảo import đúng file .jsx
 
 export default function BillingManager() {
   // --- STATE QUẢN LÝ DỮ LIỆU ---
@@ -16,10 +16,13 @@ export default function BillingManager() {
   const [selectedBill, setSelectedBill] = useState(null);
   const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
 
-  // State cho Modal Thêm Phí Lẻ (Ad-hoc)
+  // --- STATE CHO MODAL THU PHÍ LẺ (AD-HOC) ---
   const [isAdHocModalOpen, setIsAdHocModalOpen] = useState(false);
+  const [apartmentList, setApartmentList] = useState([]); 
+  const [searchTerm, setSearchTerm] = useState(''); 
+  
   const [adHocForm, setAdHocForm] = useState({
-    apartment_code: '',
+    selectedCodes: [], 
     fee_name: '',
     amount: '',
     description: ''
@@ -30,15 +33,17 @@ export default function BillingManager() {
     fetchInvoices();
   }, [month, year]);
 
-  // --- CÁC HÀM XỬ LÝ (ACTIONS) ---
+  useEffect(() => {
+    if (isAdHocModalOpen) {
+        fetchApartments();
+    }
+  }, [isAdHocModalOpen]);
 
-  // 1. Lấy danh sách hóa đơn
+  // --- CÁC HÀM API ---
   const fetchInvoices = async () => {
     setLoading(true);
     try {
-      // API Backend: GET /bills?month=10&year=2025
-      // Lưu ý: Route này mapping với hàm searchInvoices ở Controller
-      const response = await api.get('/bills/search', { params: { month, year } });
+      const response = await api.get('/invoices/search', { params: { month, year } });
       setInvoices(response.data);
     } catch (error) {
       console.error("Lỗi tải hóa đơn:", error);
@@ -47,15 +52,24 @@ export default function BillingManager() {
     }
   };
 
-  // 2. Tạo hóa đơn hàng loạt (Chốt sổ tháng)
+  const fetchApartments = async () => {
+      try {
+          const res = await api.get('/apartments'); 
+          setApartmentList(res.data);
+      } catch (err) {
+          console.error("Lỗi lấy DS căn hộ:", err);
+      }
+  };
+
+  // 1. TÍNH TOÁN (DRAFT)
   const handleGenerate = async () => {
-    if(!window.confirm(`Bạn có chắc muốn chốt sổ và tạo hóa đơn cho tháng ${month}/${year}?`)) return;
+    if(!window.confirm(`Bạn có chắc muốn chốt sổ và tính toán hóa đơn (Nháp) cho tháng ${month}/${year}?`)) return;
 
     setLoading(true);
     try {
-      await api.post('/bills/generate', { month, year });
-      alert('Tạo hóa đơn thành công!');
-      fetchInvoices(); // Tải lại danh sách sau khi tạo
+      const res = await api.post('/invoices/generate', { month, year });
+      alert(res.data.message);
+      fetchInvoices(); 
     } catch (error) {
       alert('Lỗi: ' + (error.response?.data?.message || error.message));
     } finally {
@@ -63,41 +77,71 @@ export default function BillingManager() {
     }
   };
 
-  // 3. Thêm phí lẻ thủ công (API addAdHocItem)
+  // 2. PHÁT HÀNH (PUBLISH)
+  const handlePublish = async () => {
+    if(!window.confirm(`Xác nhận PHÁT HÀNH hóa đơn tháng ${month}/${year}? \nCư dân sẽ nhìn thấy hóa đơn và có thể thanh toán sau thao tác này.`)) return;
+
+    setLoading(true);
+    try {
+      const res = await api.post('/invoices/publish', { month, year });
+      alert(res.data.message);
+      fetchInvoices(); // Load lại để cập nhật trạng thái
+    } catch (error) {
+      alert('Lỗi: ' + (error.response?.data?.message || error.message));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 3. THU PHÍ LẺ
   const handleAddAdHocFee = async (e) => {
     e.preventDefault();
-    if(!adHocForm.apartment_code || !adHocForm.amount) return alert("Vui lòng nhập đủ thông tin");
+    if(adHocForm.selectedCodes.length === 0 || !adHocForm.amount) return alert("Vui lòng chọn ít nhất 1 căn hộ và nhập số tiền");
 
     try {
         await api.post('/invoices/add-item', {
-            ...adHocForm,
-            month: month, // Lấy theo tháng đang chọn
-            year: year
+            apartment_codes: adHocForm.selectedCodes,
+            fee_name: adHocForm.fee_name,
+            amount: adHocForm.amount,
+            description: adHocForm.description,
+            month, 
+            year
         });
-        alert("Thêm phí phát sinh thành công!");
+        alert(`Đã thêm khoản thu cho ${adHocForm.selectedCodes.length} căn hộ!`);
         setIsAdHocModalOpen(false);
-        setAdHocForm({ apartment_code: '', fee_name: '', amount: '', description: '' }); // Reset form
-        fetchInvoices(); // Cập nhật lại số tiền trên bảng
+        setAdHocForm({ selectedCodes: [], fee_name: '', amount: '', description: '' });
+        fetchInvoices();
     } catch (error) {
         alert("Lỗi: " + (error.response?.data?.message || error.message));
     }
   };
 
-  // 4. Mở modal xem chi tiết
+  // --- LOGIC UI & HELPER ---
+
   const handleViewDetail = (bill) => {
-    // Parse JSON details nếu DB trả về dạng string
     let detailsParsed = [];
-    if (bill.InvoiceItems) {
-        detailsParsed = bill.InvoiceItems.map(item => ({
-            ...item,
-            // Nếu item.details là string JSON thì parse, nếu là object thì giữ nguyên
-            tieredDetails: (typeof item.details === 'string') ? JSON.parse(item.details) : item.details
-        }));
+    if (bill.InvoiceItems && Array.isArray(bill.InvoiceItems)) {
+        detailsParsed = bill.InvoiceItems.map(item => {
+            let tieredDetails = null;
+            try {
+                if (typeof item.details === 'string') {
+                    tieredDetails = JSON.parse(item.details);
+                } else {
+                    tieredDetails = item.details;
+                }
+            } catch (e) {
+                console.error("Lỗi parse details:", e);
+            }
+            return { ...item, tieredDetails: tieredDetails };
+        });
     }
 
     const billData = {
         total: bill.total_amount,
-        details: detailsParsed
+        details: detailsParsed,
+        month: bill.month,
+        year: bill.year,
+        owner_name: bill.owner_name
     };
     
     setSelectedBill({
@@ -107,9 +151,39 @@ export default function BillingManager() {
     setIsDetailModalOpen(true);
   };
 
-  // --- TÍNH TOÁN THỐNG KÊ (MEMO) ---
+  const toggleApartmentSelect = (code) => {
+      setAdHocForm(prev => {
+          const exists = prev.selectedCodes.includes(code);
+          if (exists) {
+              return { ...prev, selectedCodes: prev.selectedCodes.filter(c => c !== code) };
+          } else {
+              return { ...prev, selectedCodes: [...prev.selectedCodes, code] };
+          }
+      });
+  };
+
+  const handleSelectAll = () => {
+      const visibleCodes = filteredApartments.map(apt => apt.code);
+      const allSelected = visibleCodes.every(code => adHocForm.selectedCodes.includes(code));
+
+      if (allSelected) {
+          setAdHocForm(prev => ({ ...prev, selectedCodes: prev.selectedCodes.filter(c => !visibleCodes.includes(c)) }));
+      } else {
+          const newSelection = new Set([...adHocForm.selectedCodes, ...visibleCodes]);
+          setAdHocForm(prev => ({ ...prev, selectedCodes: Array.from(newSelection) }));
+      }
+  };
+
+  const filteredApartments = useMemo(() => {
+      return apartmentList.filter(apt => 
+          apt.code.toLowerCase().includes(searchTerm.toLowerCase()) || 
+          (apt.owner_name && apt.owner_name.toLowerCase().includes(searchTerm.toLowerCase()))
+      );
+  }, [apartmentList, searchTerm]);
+
   const stats = useMemo(() => {
     return invoices.reduce((acc, curr) => {
+      if (curr.status === 'NOT_CREATED') return acc;
       const amount = parseFloat(curr.total_amount) || 0;
       if (curr.status === 'PAID') acc.paid += amount;
       else if (curr.status === 'OVERDUE') acc.overdue += amount;
@@ -118,7 +192,7 @@ export default function BillingManager() {
     }, { paid: 0, pending: 0, overdue: 0 });
   }, [invoices]);
 
-  // --- RENDER GIAO DIỆN ---
+  // --- RENDER ---
   return (
     <div className="relative min-h-screen bg-gray-50 p-4 sm:p-6">
       
@@ -154,13 +228,17 @@ export default function BillingManager() {
           <button 
             onClick={handleGenerate}
             disabled={loading}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-white font-medium shadow-md transition transform active:scale-95 ${loading ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'}`}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-white font-medium shadow-md transition transform active:scale-95 ${loading ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
           >
-            {loading ? 'Đang xử lý...' : <><FileText size={18} /> Chốt & Tạo Hóa Đơn</>}
+            {loading ? 'Đang xử lý...' : <><FileText size={18} /> Tính Hóa Đơn (Nháp)</>}
           </button>
           
-          <button className="flex items-center gap-2 px-4 py-2 rounded-lg border border-blue-600 text-blue-600 font-medium hover:bg-blue-50 transition">
-            <Send size={18} /> Gửi thông báo
+          <button 
+            onClick={handlePublish}
+            disabled={loading}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-green-600 text-white font-medium hover:bg-green-700 shadow-md transition transform active:scale-95"
+          >
+            <Send size={18} /> Phát hành
           </button>
         </div>
       </div>
@@ -202,27 +280,50 @@ export default function BillingManager() {
             </thead>
             <tbody className="divide-y divide-gray-100">
                 {invoices.length === 0 ? (
-                    <tr><td colSpan="6" className="p-10 text-center text-gray-500 italic">Chưa có hóa đơn nào cho tháng này.</td></tr>
-                ) : invoices.map(inv => (
-                <tr key={inv.id} className="hover:bg-blue-50 transition-colors duration-150">
+                    <tr><td colSpan="6" className="p-10 text-center text-gray-500 italic">Không tìm thấy dữ liệu.</td></tr>
+                ) : invoices.map((inv, index) => (
+                <tr key={inv.id || `temp-${index}`} className={`transition-colors duration-150 ${inv.status === 'NOT_CREATED' ? 'bg-gray-50' : 'hover:bg-blue-50'}`}>
                     <td className="p-4 font-bold text-gray-700">{inv.apartment_code || inv.code}</td>
                     <td className="p-4 text-gray-600">{inv.owner_name}</td>
-                    <td className="p-4 font-bold text-blue-900">{new Intl.NumberFormat('vi-VN').format(inv.total_amount)} đ</td>
-                    <td className="p-4 text-sm text-gray-500">{new Date(inv.createdAt).toLocaleDateString('vi-VN')}</td>
+                    <td className="p-4 font-bold text-blue-900">
+                        {inv.status === 'NOT_CREATED' 
+                            ? <span className="text-gray-300">--</span> 
+                            : `${new Intl.NumberFormat('vi-VN').format(inv.total_amount)} đ`
+                        }
+                    </td>
+                    <td className="p-4 text-sm text-gray-500">
+                        {inv.createdAt ? new Date(inv.createdAt).toLocaleDateString('vi-VN') : '--'}
+                    </td>
                     <td className="p-4">
-                    <span className={`px-2 py-1 rounded-full text-xs font-bold border flex w-fit items-center gap-1
-                        ${inv.status === 'PAID' ? 'bg-green-100 text-green-700 border-green-200' : 
-                        inv.status === 'OVERDUE' ? 'bg-red-100 text-red-700 border-red-200' : 'bg-yellow-100 text-yellow-700 border-yellow-200'}`}>
-                        <span className={`w-1.5 h-1.5 rounded-full ${inv.status === 'PAID' ? 'bg-green-600' : inv.status === 'OVERDUE' ? 'bg-red-600' : 'bg-yellow-600'}`}></span>
-                        {inv.status === 'PAID' ? 'Đã thanh toán' : inv.status === 'OVERDUE' ? 'Quá hạn' : 'Chưa thu'}
-                    </span>
+                        <span className={`px-2 py-1 rounded-full text-xs font-bold border flex w-fit items-center gap-1
+                            ${inv.status === 'PAID' ? 'bg-green-100 text-green-700 border-green-200' : 
+                              inv.status === 'OVERDUE' ? 'bg-red-100 text-red-700 border-red-200' : 
+                              inv.status === 'PENDING' ? 'bg-yellow-100 text-yellow-700 border-yellow-200' :
+                              inv.status === 'DRAFT' ? 'bg-blue-100 text-blue-700 border-blue-200' :
+                              'bg-gray-200 text-gray-500 border-gray-300' 
+                            }`}>
+                            <span className={`w-1.5 h-1.5 rounded-full 
+                                ${inv.status === 'PAID' ? 'bg-green-600' : 
+                                  inv.status === 'OVERDUE' ? 'bg-red-600' : 
+                                  inv.status === 'PENDING' ? 'bg-yellow-600' :
+                                  inv.status === 'DRAFT' ? 'bg-blue-600' : 'bg-gray-500'}`}>
+                            </span>
+                            {inv.status === 'PAID' ? 'Đã thanh toán' : 
+                             inv.status === 'OVERDUE' ? 'Quá hạn' : 
+                             inv.status === 'PENDING' ? 'Chờ thanh toán' :
+                             inv.status === 'DRAFT' ? 'Nháp (Đã chốt)' : 'Chưa tạo'}
+                        </span>
                     </td>
                     <td className="p-4 text-right">
-                    <button 
-                        onClick={() => handleViewDetail(inv)}
-                        className="text-blue-600 hover:bg-blue-100 p-2 rounded-full transition" title="Xem chi tiết">
-                        <Eye size={18} />
-                    </button>
+                        {inv.status === 'NOT_CREATED' ? (
+                            <div className="text-gray-300 cursor-not-allowed" title="Cần chốt sổ trước"><Eye size={18} /></div>
+                        ) : (
+                            <button 
+                                onClick={() => handleViewDetail(inv)}
+                                className="text-blue-600 hover:bg-blue-100 p-2 rounded-full transition" title="Xem chi tiết">
+                                <Eye size={18} />
+                            </button>
+                        )}
                     </td>
                 </tr>
                 ))}
@@ -252,68 +353,114 @@ export default function BillingManager() {
       {/* --- MODAL 2: THÊM PHÍ LẺ (AD-HOC) --- */}
       {isAdHocModalOpen && (
         <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex justify-center items-center p-4 backdrop-blur-sm">
-            <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 animate-in fade-in slide-in-from-bottom-4 duration-200">
-                <div className="flex justify-between items-center mb-4">
-                    <h3 className="font-bold text-lg text-gray-800 flex items-center gap-2">
-                        <PlusCircle size={20} className="text-orange-600"/> Thêm khoản thu phát sinh
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl p-0 animate-in fade-in zoom-in duration-200 flex flex-col max-h-[90vh] overflow-hidden">
+                <div className="p-4 border-b flex justify-between items-center bg-orange-50">
+                    <h3 className="font-bold text-lg text-orange-800 flex items-center gap-2">
+                        <PlusCircle size={20}/> Thu phí phát sinh
                     </h3>
-                    <button onClick={() => setIsAdHocModalOpen(false)} className="text-gray-400 hover:text-red-500"><X size={20}/></button>
+                    <button onClick={() => setIsAdHocModalOpen(false)}><X size={20} className="text-gray-400 hover:text-red-500"/></button>
                 </div>
-                
-                <p className="text-sm text-gray-500 mb-4 bg-orange-50 p-2 rounded border border-orange-100">
-                    Khoản thu này sẽ được cộng trực tiếp vào hóa đơn tháng <b>{month}/{year}</b>.
-                </p>
 
-                <form onSubmit={handleAddAdHocFee} className="space-y-4">
-                    <div>
-                        <label className="block text-sm font-semibold text-gray-700 mb-1">Mã căn hộ <span className="text-red-500">*</span></label>
-                        <input 
-                            required 
-                            placeholder="VD: P301" 
-                            className="w-full border border-gray-300 p-2.5 rounded-lg focus:ring-2 focus:ring-orange-200 outline-none uppercase"
-                            value={adHocForm.apartment_code}
-                            onChange={e => setAdHocForm({...adHocForm, apartment_code: e.target.value.toUpperCase()})}
-                        />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-semibold text-gray-700 mb-1">Tên khoản thu <span className="text-red-500">*</span></label>
-                        <input 
-                            required 
-                            placeholder="VD: Phạt tiếng ồn, Sửa chữa..." 
-                            className="w-full border border-gray-300 p-2.5 rounded-lg focus:ring-2 focus:ring-orange-200 outline-none"
-                            value={adHocForm.fee_name}
-                            onChange={e => setAdHocForm({...adHocForm, fee_name: e.target.value})}
-                        />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-semibold text-gray-700 mb-1">Số tiền (VNĐ) <span className="text-red-500">*</span></label>
-                        <input 
-                            required type="number"
-                            placeholder="0" 
-                            className="w-full border border-gray-300 p-2.5 rounded-lg font-bold text-gray-800 focus:ring-2 focus:ring-orange-200 outline-none"
-                            value={adHocForm.amount}
-                            onChange={e => setAdHocForm({...adHocForm, amount: e.target.value})}
-                        />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-semibold text-gray-700 mb-1">Ghi chú</label>
-                        <textarea 
-                            rows="2"
-                            placeholder="Chi tiết lỗi vi phạm hoặc hạng mục sửa chữa..." 
-                            className="w-full border border-gray-300 p-2.5 rounded-lg focus:ring-2 focus:ring-orange-200 outline-none"
-                            value={adHocForm.description}
-                            onChange={e => setAdHocForm({...adHocForm, description: e.target.value})}
-                        />
+                <div className="flex flex-col md:flex-row h-full overflow-hidden">
+                    <div className="w-full md:w-1/2 flex flex-col border-r border-gray-200 h-[400px] md:h-auto">
+                        <div className="p-2 border-b flex gap-2">
+                            <Search size={18} className="text-gray-400 mt-1"/>
+                            <input 
+                                placeholder="Tìm phòng (Mã hoặc tên)..." 
+                                className="bg-transparent outline-none w-full text-sm"
+                                value={searchTerm}
+                                onChange={e => setSearchTerm(e.target.value)}
+                            />
+                        </div>
+                        <div className="p-2 bg-gray-50 border-b text-xs flex justify-between items-center">
+                            <span className="font-bold text-gray-600">Danh sách ({filteredApartments.length})</span>
+                            <button onClick={handleSelectAll} className="text-blue-600 hover:underline">
+                                {adHocForm.selectedCodes.length === filteredApartments.length && filteredApartments.length > 0 ? 'Bỏ chọn' : 'Chọn tất cả'}
+                            </button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+                            {filteredApartments.map(apt => {
+                                const isSelected = adHocForm.selectedCodes.includes(apt.code);
+                                return (
+                                    <div 
+                                        key={apt.code} 
+                                        onClick={() => toggleApartmentSelect(apt.code)}
+                                        className={`flex items-center gap-3 p-2 rounded cursor-pointer transition select-none ${isSelected ? 'bg-orange-100 border border-orange-200' : 'hover:bg-gray-50 border border-transparent'}`}
+                                    >
+                                        {isSelected 
+                                            ? <CheckSquare size={20} className="text-orange-600 flex-shrink-0"/> 
+                                            : <Square size={20} className="text-gray-300 flex-shrink-0"/>
+                                        }
+                                        <div>
+                                            <div className="font-bold text-gray-800 text-sm">{apt.code}</div>
+                                            <div className="text-xs text-gray-500">{apt.owner_name || 'Chưa có chủ'}</div>
+                                        </div>
+                                    </div>
+                                )
+                            })}
+                            {filteredApartments.length === 0 && <p className="text-center text-gray-400 text-sm mt-4">Không tìm thấy căn hộ</p>}
+                        </div>
+                        <div className="p-2 bg-orange-100 border-t text-xs font-bold text-orange-800 text-center">
+                            Đã chọn: {adHocForm.selectedCodes.length} căn hộ
+                        </div>
                     </div>
 
-                    <div className="flex justify-end gap-3 mt-6 border-t pt-4">
-                        <button type="button" onClick={() => setIsAdHocModalOpen(false)} className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg font-medium">Hủy</button>
-                        <button type="submit" className="px-4 py-2 bg-orange-600 text-white font-bold rounded-lg hover:bg-orange-700 shadow-md transition">Xác nhận thu</button>
+                    <div className="w-full md:w-1/2 p-6 bg-gray-50 flex flex-col justify-center">
+                        <form onSubmit={handleAddAdHocFee} className="space-y-4">
+                            <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-200">
+                                <div className="flex items-center gap-2 mb-2 text-orange-600 font-bold text-sm uppercase">
+                                    <AlertCircle size={16}/> Thông tin khoản thu
+                                </div>
+                                <div className="text-sm text-gray-600 mb-4">
+                                    Khoản phí này sẽ được cộng vào hóa đơn tháng <b>{month}/{year}</b> cho các căn hộ đã chọn.
+                                </div>
+
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="block text-sm font-semibold text-gray-700 mb-1">Tên khoản thu <span className="text-red-500">*</span></label>
+                                        <input 
+                                            required 
+                                            placeholder="VD: Phí sửa chữa, Phạt vi phạm..." 
+                                            className="w-full border border-gray-300 p-2.5 rounded-lg focus:ring-2 focus:ring-orange-200 outline-none transition"
+                                            value={adHocForm.fee_name}
+                                            onChange={e => setAdHocForm({...adHocForm, fee_name: e.target.value})}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-semibold text-gray-700 mb-1">Số tiền (VNĐ) <span className="text-red-500">*</span></label>
+                                        <input 
+                                            required type="number"
+                                            placeholder="0" 
+                                            className="w-full border border-gray-300 p-2.5 rounded-lg font-bold text-gray-800 focus:ring-2 focus:ring-orange-200 outline-none transition"
+                                            value={adHocForm.amount}
+                                            onChange={e => setAdHocForm({...adHocForm, amount: e.target.value})}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-semibold text-gray-700 mb-1">Ghi chú</label>
+                                        <textarea 
+                                            rows="3"
+                                            placeholder="Chi tiết..." 
+                                            className="w-full border border-gray-300 p-2.5 rounded-lg focus:ring-2 focus:ring-orange-200 outline-none resize-none transition"
+                                            value={adHocForm.description}
+                                            onChange={e => setAdHocForm({...adHocForm, description: e.target.value})}
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="flex justify-end gap-3 pt-2">
+                                <button type="button" onClick={() => setIsAdHocModalOpen(false)} className="px-5 py-2.5 text-gray-600 hover:bg-gray-200 rounded-lg font-medium transition">Hủy</button>
+                                <button type="submit" className="px-5 py-2.5 bg-orange-600 text-white font-bold rounded-lg hover:bg-orange-700 shadow-lg shadow-orange-200 transition transform active:scale-95">
+                                    Xác nhận thu
+                                </button>
+                            </div>
+                        </form>
                     </div>
-                </form>
+                </div>
             </div>
         </div>
-       )}
+      )}
     </div>
   );
 }
