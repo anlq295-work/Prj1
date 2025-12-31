@@ -54,3 +54,37 @@ exports.login = async (req, res) => {
         res.status(500).json({ message: "Lỗi Server" });
     }
 };
+
+exports.changePassword = async (req, res) => {
+    try {
+        // Lấy userId từ token (được middleware auth gán vào req.user)
+        // Hoặc gửi kèm userId trong body (tùy middleware của bạn)
+        // Ở đây giả sử bạn gửi username lên để tìm user
+        const { username, oldPassword, newPassword } = req.body;
+
+        const user = await User.findOne({ where: { username } });
+        if (!user) {
+            return res.status(404).json({ message: "Không tìm thấy tài khoản!" });
+        }
+
+        // 1. Kiểm tra mật khẩu cũ
+        const isMatch = await bcrypt.compare(oldPassword, user.password);
+        if (!isMatch) {
+            return res.status(400).json({ message: "Mật khẩu cũ không đúng!" });
+        }
+
+        // 2. Mã hóa mật khẩu mới
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+        // 3. Cập nhật
+        user.password = hashedPassword;
+        await user.save();
+
+        res.json({ message: "Đổi mật khẩu thành công!" });
+
+    } catch (err) {
+        console.error("Lỗi đổi pass:", err);
+        res.status(500).json({ error: err.message });
+    }
+};

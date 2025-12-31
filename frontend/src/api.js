@@ -73,4 +73,6 @@ export const getApartments = () => api.get('/apartments');
 export const getUsages = (month, year) => api.get('/usage', { params: { month, year } });
 export const saveUsages = (data) => api.post('/usage', data);
 
+export const changePassword = (data) => api.post('/auth/change-password', data);
+
 export default api;
