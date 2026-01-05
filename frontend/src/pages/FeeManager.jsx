@@ -1,5 +1,6 @@
+// src/pages/FeeManager.jsx
 import React, { useState, useEffect } from 'react';
-import { Plus, Trash2, Edit, CheckCircle, XCircle, Save, X, Zap, DollarSign, Maximize, Layers } from 'lucide-react';
+import { Plus, Trash2, Edit, CheckCircle, XCircle, Save, X, Zap, DollarSign, Maximize, Layers, Tag } from 'lucide-react';
 import api from '../api';
 
 export default function FeeManager() {
@@ -15,49 +16,46 @@ export default function FeeManager() {
     calc_method: 'FLAT', // FLAT, PER_M2, PER_UNIT, TIERED
     price: '', 
     unit: '',
-    tier_config: [] 
+    tier_config: [],
+    // Thêm category cho FeeType mới
+    category: 'FIXED' 
   });
 
-  // State quản lý danh sách bậc giá (cho loại phí Lũy tiến)
   const [tiers, setTiers] = useState([{ limit: '', price: '' }]);
 
   useEffect(() => {
     fetchFees();
   }, []);
 
-  // --- 1. HÀM LẤY DỮ LIỆU & XỬ LÝ ĐƠN VỊ TÍNH ---
+  const mapApiFeeToState = (f) => {
+    // Parse Tier Config an toàn
+    let tierConfig = [];
+    try {
+        tierConfig = typeof f.tier_config === 'string' ? JSON.parse(f.tier_config) : (f.tier_config || []);
+    } catch (e) {}
+
+    // --- LOGIC QUAN TRỌNG: FALLBACK DỮ LIỆU ---
+    const realName = f.FeeType?.name || f.name || 'Chưa đặt tên';
+    const realUnit = f.FeeType?.unit || guessUnit(f.calc_method, realName);
+    const realCategory = f.FeeType?.category || 'FIXED';
+
+    return {
+      id: f.id,
+      fee_type_id: f.fee_type_id,
+      name: realName, 
+      category: realCategory,
+      price: f.unit_price || 0,
+      unit: realUnit,
+      calc_method: f.calc_method,
+      tier_config: tierConfig,
+      active: f.is_active
+    };
+  };
+
   const fetchFees = async () => {
     try {
       const response = await api.get('/fees');
-      const mappedFees = response.data.map(f => {
-        
-        // LOGIC TỰ ĐỘNG ĐOÁN ĐƠN VỊ HIỂN THỊ (SỬA LỖI HIỂN THỊ SAI)
-        let displayUnit = f.unit; 
-        
-        if (!displayUnit) {
-            if (f.calc_method === 'PER_M2') {
-                displayUnit = 'm2'; // Nếu tính theo m2 thì chắc chắn là m2
-            } else if (f.calc_method === 'PER_UNIT') {
-                 displayUnit = f.name.toLowerCase().includes('điện') ? 'kWh' 
-                             : f.name.toLowerCase().includes('nước') ? 'm3' : 'số';
-            } else if (f.calc_method === 'TIERED') {
-                 displayUnit = f.name.toLowerCase().includes('điện') ? 'kWh' : 'm3';
-            } else {
-                 displayUnit = 'tháng'; // Mặc định cho FLAT
-            }
-        }
-
-        return {
-          id: f.id,
-          name: f.name,
-          price: f.unit_price || 0,
-          unit: displayUnit, 
-          calc_method: f.calc_method,
-          // Parse JSON nếu DB trả về string, giữ nguyên nếu là object
-          tier_config: typeof f.tier_config === 'string' ? JSON.parse(f.tier_config) : f.tier_config,
-          active: f.is_active
-        };
-      });
+      const mappedFees = response.data.map(mapApiFeeToState);
       setFees(mappedFees);
     } catch (error) {
       console.error("Lỗi tải danh sách phí:", error);
@@ -66,7 +64,15 @@ export default function FeeManager() {
     }
   };
 
-  // --- CÁC HÀM XỬ LÝ FORM LŨY TIẾN ---
+  // Hàm phụ trợ đoán đơn vị nếu DB bị null
+  const guessUnit = (method, name) => {
+      const n = name.toLowerCase();
+      if (method === 'PER_M2') return 'm2';
+      if (n.includes('điện')) return 'kWh';
+      if (n.includes('nước')) return 'm3';
+      return 'tháng';
+  };
+
   const handleTierChange = (index, field, value) => {
     const newTiers = [...tiers];
     newTiers[index][field] = value;
@@ -82,14 +88,12 @@ export default function FeeManager() {
     setTiers(newTiers);
   };
 
-  // --- HÀM LƯU (THÊM/SỬA) ---
   const handleSave = async (e) => {
     e.preventDefault();
 
     let finalTierConfig = null;
     let finalPrice = parseFloat(formData.price);
 
-    // Nếu chọn Lũy tiến, format lại dữ liệu tiers
     if (formData.calc_method === 'TIERED') {
       finalTierConfig = tiers.map(t => ({
         limit: t.limit ? parseFloat(t.limit) : null, 
@@ -98,25 +102,33 @@ export default function FeeManager() {
       finalPrice = 0; 
     }
 
+    // Logic category tự động
+    let category = 'FIXED';
+    if (formData.calc_method === 'TIERED' || formData.calc_method === 'PER_UNIT') category = 'METER';
+    else if (formData.calc_method === 'PER_M2') category = 'FIXED';
+
     const payload = {
-      name: formData.name,
+      name: formData.name, // Sẽ tạo FeeType nếu chưa có
       unit_price: finalPrice,
       calc_method: formData.calc_method,
       tier_config: finalTierConfig,
-      type: 'FIXED',
+      category: category,
       unit: formData.unit, 
       is_active: true
     };
 
     try {
       if (editingId) {
-        await api.put(`/fees/${editingId}`, payload); // Cần đảm bảo file api.js có hàm updateFee
+        const response = await api.put(`/fees/${editingId}`, payload);
+        const updatedFee = mapApiFeeToState(response.data);
+        setFees(fees.map(f => f.id === editingId ? updatedFee : f));
         alert('Cập nhật thành công!');
       } else {
-        await api.post('/fees', payload);
+        const response = await api.post('/fees', payload);
+        const newFee = mapApiFeeToState(response.data);
+        setFees([newFee, ...fees]);
         alert('Thêm mới thành công!');
       }
-      fetchFees();
       closeForm();
     } catch (error) {
       alert('Lỗi: ' + (error.response?.data?.message || error.message));
@@ -126,7 +138,7 @@ export default function FeeManager() {
   const handleDelete = async (id) => {
     if (window.confirm('Bạn có chắc muốn xóa loại phí này?')) {
       try {
-        await api.delete(`/fees/${id}`); // Cần đảm bảo file api.js có hàm deleteFee
+        await api.delete(`/fees/${id}`);
         fetchFees();
       } catch (error) {
         alert('Lỗi: ' + error.message);
@@ -134,10 +146,9 @@ export default function FeeManager() {
     }
   };
 
-  // --- FORM CONTROL ---
   const handleStartAdd = () => {
     setEditingId(null);
-    setFormData({ name: '', calc_method: 'FLAT', price: '', unit: '', tier_config: [] });
+    setFormData({ name: '', calc_method: 'FLAT', price: '', unit: '', tier_config: [], category: 'FIXED' });
     setTiers([{ limit: '', price: '' }]);
     setIsFormOpen(true);
   };
@@ -149,7 +160,8 @@ export default function FeeManager() {
       calc_method: fee.calc_method,
       price: fee.price,
       unit: fee.unit,
-      tier_config: fee.tier_config || []
+      tier_config: fee.tier_config || [],
+      category: fee.category
     });
     
     if (fee.calc_method === 'TIERED' && fee.tier_config) {
@@ -166,7 +178,6 @@ export default function FeeManager() {
     setEditingId(null);
   };
 
-  // Helper render Badge
   const renderTypeBadge = (method) => {
     switch (method) {
       case 'TIERED':
@@ -191,7 +202,6 @@ export default function FeeManager() {
         </button>
       </div>
 
-      {/* --- FORM MODAL --- */}
       {isFormOpen && (
         <div className="fixed inset-0 bg-black bg-opacity-40 flex justify-center items-center z-50 px-4 backdrop-blur-sm">
           <form onSubmit={handleSave} className="bg-white p-6 rounded-xl shadow-2xl w-full max-w-2xl border-t-4 border-blue-600 relative max-h-[90vh] overflow-y-auto animate-in fade-in zoom-in duration-200">
@@ -202,33 +212,24 @@ export default function FeeManager() {
             </h3>
 
             <div className="space-y-6">
-              {/* CHỌN PHƯƠNG THỨC TÍNH */}
               <div>
                 <label className="block text-sm font-bold text-gray-700 mb-3">Cách tính phí:</label>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  
-                  {/* 1. Cố Định */}
                   <div onClick={() => setFormData({ ...formData, calc_method: 'FLAT', unit: 'tháng' })}
                     className={`cursor-pointer border rounded-lg p-3 flex flex-col items-center gap-2 transition ${formData.calc_method === 'FLAT' ? 'bg-gray-100 border-gray-500 ring-1 ring-gray-500' : 'hover:bg-gray-50'}`}>
                     <DollarSign size={20} className="text-gray-600" />
                     <span className="text-xs font-bold">Cố định</span>
                   </div>
-
-                  {/* 2. Theo Diện Tích (Đã thêm auto set unit = m2) */}
                   <div onClick={() => setFormData({ ...formData, calc_method: 'PER_M2', unit: 'm2' })}
                     className={`cursor-pointer border rounded-lg p-3 flex flex-col items-center gap-2 transition ${formData.calc_method === 'PER_M2' ? 'bg-blue-50 border-blue-500 ring-1 ring-blue-500' : 'hover:bg-gray-50'}`}>
                     <Maximize size={20} className="text-blue-600" />
                     <span className="text-xs font-bold">Diện tích</span>
                   </div>
-
-                  {/* 3. Theo Chỉ Số */}
                   <div onClick={() => setFormData({ ...formData, calc_method: 'PER_UNIT', unit: 'kWh' })}
                     className={`cursor-pointer border rounded-lg p-3 flex flex-col items-center gap-2 transition ${formData.calc_method === 'PER_UNIT' ? 'bg-yellow-50 border-yellow-500 ring-1 ring-yellow-500' : 'hover:bg-gray-50'}`}>
                     <Zap size={20} className="text-yellow-600" />
-                    <span className="text-xs font-bold">Chỉ số (đều)</span>
+                    <span className="text-xs font-bold">Chỉ số</span>
                   </div>
-
-                  {/* 4. Lũy Tiến */}
                   <div onClick={() => setFormData({ ...formData, calc_method: 'TIERED', unit: 'kWh' })}
                     className={`cursor-pointer border rounded-lg p-3 flex flex-col items-center gap-2 transition ${formData.calc_method === 'TIERED' ? 'bg-purple-50 border-purple-500 ring-1 ring-purple-500' : 'hover:bg-gray-50'}`}>
                     <Layers size={20} className="text-purple-600" />
@@ -237,7 +238,6 @@ export default function FeeManager() {
                 </div>
               </div>
 
-              {/* Tên & Đơn vị */}
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Tên loại phí</label>
@@ -249,9 +249,7 @@ export default function FeeManager() {
                 </div>
               </div>
 
-              {/* LOGIC NHẬP GIÁ (ĐỔI THEO METHOD) */}
               {formData.calc_method !== 'TIERED' ? (
-                // FORM NHẬP GIÁ ĐƠN GIẢN
                 <div>
                    <label className="block text-sm font-medium text-gray-700 mb-1">
                       {formData.calc_method === 'FLAT' ? 'Số tiền trọn gói' : 'Đơn giá / Tỷ giá'} (VNĐ)
@@ -260,7 +258,6 @@ export default function FeeManager() {
                           value={formData.price} onChange={e => setFormData({ ...formData, price: e.target.value })} />
                 </div>
               ) : (
-                // FORM NHẬP LŨY TIẾN (DYNAMIC LIST)
                 <div className="bg-purple-50 p-4 rounded-lg border border-purple-100">
                   <div className="flex justify-between items-center mb-2">
                      <label className="block text-sm font-bold text-purple-800">Cấu hình bậc thang giá</label>
@@ -279,7 +276,7 @@ export default function FeeManager() {
                         <div className="col-span-4">
                           <input 
                             type="number" 
-                            placeholder={index === tiers.length - 1 ? "Không GH (để trống)" : "VD: 50"} 
+                            placeholder={index === tiers.length - 1 ? "Vô cực" : "VD: 50"} 
                             className="w-full border border-gray-300 p-2 rounded text-sm focus:border-purple-500 outline-none"
                             value={tier.limit || ''}
                             onChange={(e) => handleTierChange(index, 'limit', e.target.value)}
@@ -301,7 +298,6 @@ export default function FeeManager() {
                         </div>
                       </div>
                     ))}
-                    <p className="text-xs text-gray-500 italic mt-2">* Để trống "Mức sử dụng" ở dòng cuối cùng để tính cho tất cả số lượng còn lại (vô cực).</p>
                   </div>
                 </div>
               )}
@@ -317,12 +313,12 @@ export default function FeeManager() {
         </div>
       )}
 
-      {/* --- BẢNG DANH SÁCH --- */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
         <table className="w-full text-left border-collapse">
           <thead className="bg-gray-50 text-gray-600 uppercase text-xs font-bold">
             <tr>
               <th className="p-4 border-b">Tên phí</th>
+              <th className="p-4 border-b">Phân loại</th>
               <th className="p-4 border-b">Cách tính</th>
               <th className="p-4 border-b">Đơn giá / Cấu hình</th>
               <th className="p-4 border-b">Trạng thái</th>
@@ -331,10 +327,11 @@ export default function FeeManager() {
           </thead>
           <tbody className="divide-y divide-gray-100">
             {fees.length === 0 ? (
-                <tr><td colSpan="5" className="p-8 text-center text-gray-500 italic">Chưa có loại phí nào được tạo.</td></tr>
+                <tr><td colSpan="6" className="p-8 text-center text-gray-500 italic">Chưa có loại phí nào được tạo.</td></tr>
             ) : fees.map(fee => (
               <tr key={fee.id} className="hover:bg-blue-50 transition-colors">
                 <td className="p-4 font-semibold text-gray-800">{fee.name}</td>
+                <td className="p-4 text-xs text-gray-500"><Tag size={12} className="inline mr-1"/>{fee.category}</td>
                 <td className="p-4">
                   {renderTypeBadge(fee.calc_method)}
                 </td>
@@ -343,12 +340,6 @@ export default function FeeManager() {
                      <div className="text-sm">
                         <div className="font-bold text-purple-700">
                           {fee.tier_config?.length || 0} bậc giá
-                        </div>
-                        <div className="text-xs text-gray-500 mt-1">
-                          {fee.tier_config && fee.tier_config[0] 
-                            ? `Bậc 1: ${new Intl.NumberFormat('vi-VN').format(fee.tier_config[0].price)} đ` 
-                            : ''}
-                          ...
                         </div>
                      </div>
                   ) : (
@@ -362,8 +353,8 @@ export default function FeeManager() {
                   {fee.active ? <span className="text-green-600 text-xs font-bold flex items-center gap-1"><CheckCircle size={14} /> Active</span> : <span className="text-gray-400 text-xs font-bold flex items-center gap-1"><XCircle size={14} /> Inactive</span>}
                 </td>
                 <td className="p-4 text-right">
-                  <button onClick={() => handleStartEdit(fee)} className="text-blue-500 hover:bg-blue-100 p-2 rounded-full mx-1" title="Sửa"><Edit size={18} /></button>
-                  <button onClick={() => handleDelete(fee.id)} className="text-red-500 hover:bg-red-100 p-2 rounded-full mx-1" title="Xóa"><Trash2 size={18} /></button>
+                  <button onClick={() => handleStartEdit(fee)} className="text-blue-500 hover:bg-blue-100 p-2 rounded-full mx-1"><Edit size={18} /></button>
+                  <button onClick={() => handleDelete(fee.id)} className="text-red-500 hover:bg-red-100 p-2 rounded-full mx-1"><Trash2 size={18} /></button>
                 </td>
               </tr>
             ))}

@@ -37,10 +37,10 @@ export default function UsageManager() {
       await api.post('/usage', {
         month,
         year,
-        data: data // Gửi toàn bộ mảng về server
+        data: data 
       });
       alert('Lưu thành công!');
-      fetchData(); // Reload để cập nhật trạng thái
+      fetchData(); 
     } catch (err) {
       alert('Lỗi khi lưu: ' + err.message);
     } finally {

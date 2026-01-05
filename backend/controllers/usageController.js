@@ -1,65 +1,97 @@
-const { Usage, Apartment } = require('../models');
+const { Usage, Apartment, BillingPeriod, FeeType } = require('../models');
 
-// Lấy danh sách chỉ số (Kết hợp Apartment + Usage)
+// API: Lấy danh sách chỉ số (Pivot dữ liệu để hiển thị ngang trên UI)
 exports.getUsages = async (req, res) => {
     const { month, year } = req.query;
     try {
+        // 1. Lấy tất cả căn hộ
         const apartments = await Apartment.findAll({ order: [['code', 'ASC']] });
-        const usages = await Usage.findAll({ where: { month, year } });
+        
+        // 2. Tìm kỳ thu (nếu chưa có thì thôi)
+        const period = await BillingPeriod.findOne({ where: { month, year } });
+        
+        // 3. Lấy tất cả Usage của kỳ này (nếu có)
+        let usages = [];
+        if (period) {
+            usages = await Usage.findAll({ 
+                where: { billing_period_id: period.id },
+                include: [{ model: FeeType }]
+            });
+        }
 
-        // Merge dữ liệu: Căn nào chưa có usage thì tạo object rỗng để điền
+        // 4. Biến đổi dữ liệu (Pivot) để trả về Frontend
+        // Frontend cần: { apartment_code, old_electric, new_electric, old_water, new_water }
         const result = apartments.map(apt => {
-            const u = usages.find(x => x.apartment_code === apt.code);
+            // Tìm usage của căn này
+            const aptUsages = usages.filter(u => u.apartment_id === apt.id);
+            
+            // Tìm cụ thể điện và nước
+            const electric = aptUsages.find(u => u.FeeType.name.toLowerCase().includes('điện'));
+            const water = aptUsages.find(u => u.FeeType.name.toLowerCase().includes('nước'));
+
             return {
                 apartment_code: apt.code,
-                owner_name: apt.owner_name,
-                old_electric: u ? u.old_electric : 0,
-                new_electric: u ? u.new_electric : 0,
-                old_water: u ? u.old_water : 0,
-                new_water: u ? u.new_water : 0,
-                saved: !!u // Đánh dấu là đã lưu hay chưa
+                apartment_id: apt.id,
+                // Điện
+                old_electric: electric ? electric.old_value : 0,
+                new_electric: electric ? electric.new_value : 0,
+                // Nước
+                old_water: water ? water.old_value : 0,
+                new_water: water ? water.new_value : 0,
+                
+                saved: aptUsages.length > 0
             };
         });
 
         res.json(result);
     } catch (err) {
+        console.error(err);
         res.status(500).json({ error: err.message });
     }
 };
 
-// Lưu chỉ số (Upsert - Có rồi thì sửa, chưa có thì tạo)
+// API: Lưu chỉ số
 exports.saveUsages = async (req, res) => {
-    const { month, year, data } = req.body; // data là mảng danh sách
+    const { month, year, data } = req.body; // data là mảng từ frontend
     try {
-        for (const item of data) {
-            // Tìm bản ghi cũ
-            const existing = await Usage.findOne({ 
-                where: { apartment_code: item.apartment_code, month, year } 
-            });
+        // 1. Tìm hoặc tạo Kỳ Thu
+        const [period] = await BillingPeriod.findOrCreate({
+            where: { month, year },
+            defaults: { month, year, status: 'OPEN' }
+        });
 
-            if (existing) {
-                // Update
-                await existing.update({
-                    old_electric: item.old_electric,
-                    new_electric: item.new_electric,
-                    old_water: item.old_water,
-                    new_water: item.new_water
-                });
-            } else {
-                // Create
-                await Usage.create({
-                    apartment_code: item.apartment_code,
-                    month,
-                    year,
-                    old_electric: item.old_electric,
-                    new_electric: item.new_electric,
-                    old_water: item.old_water,
-                    new_water: item.new_water
-                });
-            }
+        // 2. Lấy ID của loại phí Điện và Nước
+        const electricType = await FeeType.findOne({ where: { name: 'Tiền điện' } }); // Đảm bảo tên đúng trong DB
+        const waterType = await FeeType.findOne({ where: { name: 'Tiền nước' } });
+
+        if (!electricType || !waterType) {
+            return res.status(400).json({ message: "Chưa cấu hình loại phí 'Tiền điện' hoặc 'Tiền nước' trong hệ thống." });
         }
+
+        // 3. Lưu từng dòng
+        for (const item of data) {
+            // Lưu Điện
+            await Usage.upsert({
+                apartment_id: item.apartment_id, // Frontend cần gửi kèm ID này, hoặc query từ code
+                fee_type_id: electricType.id,
+                billing_period_id: period.id,
+                old_value: item.old_electric,
+                new_value: item.new_electric
+            }); // Note: upsert của Postgres cần unique constraint (đã tạo ở bước SQL)
+
+            // Lưu Nước
+            await Usage.upsert({
+                apartment_id: item.apartment_id,
+                fee_type_id: waterType.id,
+                billing_period_id: period.id,
+                old_value: item.old_water,
+                new_value: item.new_water
+            });
+        }
+
         res.json({ message: "Đã lưu chỉ số thành công!" });
     } catch (err) {
+        console.error(err);
         res.status(500).json({ error: err.message });
     }
 };

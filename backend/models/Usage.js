@@ -1,33 +1,18 @@
-// G:\Prj1\backend\models\Usage.js
 const { DataTypes } = require('sequelize');
 const sequelize = require('../config/database');
 
 const Usage = sequelize.define('Usage', {
-  id: { 
-    type: DataTypes.INTEGER, 
-    autoIncrement: true, 
-    primaryKey: true 
-  },
-  apartment_code: { 
-    type: DataTypes.STRING, 
-    allowNull: false 
-  },
-  month: { 
-    type: DataTypes.INTEGER, 
-    allowNull: false 
-  },
-  year: { 
-    type: DataTypes.INTEGER, 
-    allowNull: false 
-  },
-  old_electric: { type: DataTypes.FLOAT, defaultValue: 0 },
-  new_electric: { type: DataTypes.FLOAT, defaultValue: 0 },
-  old_water: { type: DataTypes.FLOAT, defaultValue: 0 },
-  new_water: { type: DataTypes.FLOAT, defaultValue: 0 },
+  id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+  apartment_id: { type: DataTypes.INTEGER, allowNull: false },
+  fee_type_id: { type: DataTypes.INTEGER, allowNull: false }, // Loại phí (Điện/Nước)
+  billing_period_id: { type: DataTypes.INTEGER }, // Gắn với kỳ thu nào
+  
+  old_value: { type: DataTypes.FLOAT, defaultValue: 0 },
+  new_value: { type: DataTypes.FLOAT, defaultValue: 0 },
   reading_date: { type: DataTypes.DATE, defaultValue: DataTypes.NOW }
 }, {
-  tableName: 'Usages',
-  timestamps: true
+  tableName: 'usages_new', // Tạm thời map vào bảng mới
+  timestamps: false
 });
 
 module.exports = Usage;

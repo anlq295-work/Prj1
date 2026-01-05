@@ -63,7 +63,7 @@ export default function BillingManager() {
 
   // 1. TÍNH TOÁN (DRAFT)
   const handleGenerate = async () => {
-    if(!window.confirm(`Bạn có chắc muốn chốt sổ và tính toán hóa đơn (Nháp) cho tháng ${month}/${year}?`)) return;
+    if(!window.confirm(`Bạn có chắc muốn tính toán hóa đơn tháng ${month}/${year}?`)) return;
 
     setLoading(true);
     try {
@@ -71,11 +71,12 @@ export default function BillingManager() {
       alert(res.data.message);
       fetchInvoices(); 
     } catch (error) {
+      // Handle lỗi "Kỳ thu đã đóng"
       alert('Lỗi: ' + (error.response?.data?.message || error.message));
     } finally {
       setLoading(false);
     }
-  };
+};
 
   // 2. PHÁT HÀNH (PUBLISH)
   const handlePublish = async () => {

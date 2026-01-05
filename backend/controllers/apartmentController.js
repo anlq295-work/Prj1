@@ -1,14 +1,28 @@
-// controllers/apartmentController.js
-const { Apartment } = require('../models');
+const { Apartment, Household } = require('../models');
 
 exports.getAllApartments = async (req, res) => {
     try {
         const apartments = await Apartment.findAll({
-            order: [['code', 'ASC']] // Sắp xếp theo mã căn (A101, A102...)
+            include: [{
+                model: Household,
+                as: 'Households',
+                where: { status: 'ACTIVE' }, // Chỉ lấy hộ đang ở
+                required: false, // Left join (để vẫn hiện căn trống)
+                limit: 1 // Lấy 1 chủ hộ đại diện
+            }],
+            order: [['code', 'ASC']]
         });
-        res.json(apartments);
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ message: "Lỗi server khi lấy danh sách căn hộ" });
+
+        // Flatten data cho dễ dùng
+        const result = apartments.map(apt => ({
+            id: apt.id,
+            code: apt.code,
+            area: apt.area,
+            owner_name: apt.Households[0] ? apt.Households[0].owner_name : '(Trống)'
+        }));
+
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 };
