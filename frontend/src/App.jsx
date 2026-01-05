@@ -11,6 +11,7 @@ import {
   Bell, 
   ChevronDown,
   Building,
+  Settings,
   Zap // <--- Import Zap icon for Utilities
 } from 'lucide-react';
 
@@ -20,7 +21,8 @@ import api from './api'; // Import configured axios instance
 import FeeManager from './pages/FeeManager';
 import BillingManager from './pages/BillingManager';
 import ResidentPortal from './pages/ResidentPortal';
-import UsageManager from './pages/UsageManager'; // <--- Import UsageManager
+import UsageManager from './pages/UsageManager'; 
+import BuildingInfo from './pages/BuildingInfo';
 
 // --- REAL LOGIN FUNCTION (CALLS BACKEND) ---
 const loginUser = async (username, password) => {
@@ -153,6 +155,7 @@ function AdminLayout({ children, user, onLogout }) {
             case '/admin/fees': return 'Cấu hình Biểu phí';
             case '/admin/billing': return 'Quản lý Hóa đơn';
             case '/admin/usage': return 'Chốt Điện Nước';
+            case '/admin/info': return 'Thông tin Tòa nhà';
             default: return 'Bảng điều khiển';
         }
     };
@@ -176,6 +179,7 @@ function AdminLayout({ children, user, onLogout }) {
                     <SidebarLink to="/admin/fees" icon={LayoutDashboard} label="Cấu hình Phí" />
                     <SidebarLink to="/admin/billing" icon={Users} label="Hóa đơn & Thu tiền" />
                     <SidebarLink to="/admin/usage" icon={Zap} label="Chốt Điện Nước" />
+                    <SidebarLink to="/admin/info" icon={Building} label="Thông tin Tòa nhà" />
                 </nav>
 
                 <div className="p-4 border-t border-slate-800">
@@ -254,6 +258,9 @@ export default function App() {
         } />
         <Route path="/admin/usage" element={
             user ? <AdminLayout user={user} onLogout={handleLogout}><UsageManager /></AdminLayout> : <Navigate to="/login" />
+        } />
+        <Route path="/admin/info" element={
+            user ? <AdminLayout user={user} onLogout={handleLogout}><BuildingInfo /></AdminLayout> : <Navigate to="/login" />
         } />
 
         <Route path="*" element={<Navigate to="/login" />} />
