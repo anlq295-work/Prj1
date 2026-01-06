@@ -7,50 +7,62 @@ const Household = require('./Household');
 const FeeType = require('./FeeType');
 const FeeConfig = require('./FeeConfig');
 const BillingPeriod = require('./BillingPeriod');
-const Usage = require('./Usage');
+const MeterReading = require('./MeterReading'); // Đổi từ Usage -> MeterReading
 const Invoice = require('./Invoice');
 const InvoiceItem = require('./InvoiceItem');
 const Payment = require('./Payment');
-const User = require('./User'); // Giữ nguyên User cũ
+const User = require('./User');
+const UserProfile = require('./UserProfile');
 
 // 2. Thiết lập Quan hệ (Associations)
 
-// --- Căn hộ & Hộ dân ---
-Apartment.hasMany(Household, { foreignKey: 'apartment_id', as: 'Households' });
-Household.belongsTo(Apartment, { foreignKey: 'apartment_id', as: 'Apartment' });
+// --- User & Profile ---
+User.hasOne(UserProfile, { foreignKey: 'user_id' });
+UserProfile.belongsTo(User, { foreignKey: 'user_id' });
 
-// --- Phí ---
+// --- Căn hộ & Hộ dân ---
+Apartment.hasMany(Household, { foreignKey: 'apartment_id' });
+Household.belongsTo(Apartment, { foreignKey: 'apartment_id' });
+
+// --- Phí (Config & Type) ---
 FeeType.hasMany(FeeConfig, { foreignKey: 'fee_type_id' });
 FeeConfig.belongsTo(FeeType, { foreignKey: 'fee_type_id' });
 
-// --- Chỉ số (Usage) ---
-// Usage liên quan đến Căn hộ (vật lý) và Kỳ thu
-Apartment.hasMany(Usage, { foreignKey: 'apartment_id' });
-Usage.belongsTo(Apartment, { foreignKey: 'apartment_id' });
+// --- Chỉ số (MeterReading) ---
+// Liên kết với Căn hộ
+Apartment.hasMany(MeterReading, { foreignKey: 'apartment_id' });
+MeterReading.belongsTo(Apartment, { foreignKey: 'apartment_id' });
 
-BillingPeriod.hasMany(Usage, { foreignKey: 'billing_period_id' });
-Usage.belongsTo(BillingPeriod, { foreignKey: 'billing_period_id' });
+// Liên kết với Kỳ thu
+BillingPeriod.hasMany(MeterReading, { foreignKey: 'billing_period_id' });
+MeterReading.belongsTo(BillingPeriod, { foreignKey: 'billing_period_id' });
 
-FeeType.hasMany(Usage, { foreignKey: 'fee_type_id' });
-Usage.belongsTo(FeeType, { foreignKey: 'fee_type_id' });
+// Liên kết với Loại phí
+FeeType.hasMany(MeterReading, { foreignKey: 'fee_type_id' });
+MeterReading.belongsTo(FeeType, { foreignKey: 'fee_type_id' });
 
 // --- Hóa đơn (Invoice) ---
-// Invoice gắn với Hộ dân (người trả tiền) và Kỳ thu
-Household.hasMany(Invoice, { foreignKey: 'household_id', as: 'Invoices' });
-Invoice.belongsTo(Household, { foreignKey: 'household_id', as: 'Household' });
+// Liên kết Hộ dân
+Household.hasMany(Invoice, { foreignKey: 'household_id' });
+Invoice.belongsTo(Household, { foreignKey: 'household_id' });
 
-BillingPeriod.hasMany(Invoice, { foreignKey: 'billing_period_id', as: 'Invoices' });
-Invoice.belongsTo(BillingPeriod, { foreignKey: 'billing_period_id', as: 'BillingPeriod' });
+// Liên kết Căn hộ (Để query nhanh)
+Apartment.hasMany(Invoice, { foreignKey: 'apartment_id' });
+Invoice.belongsTo(Apartment, { foreignKey: 'apartment_id' });
 
-// Invoice Items
-Invoice.hasMany(InvoiceItem, { foreignKey: 'invoice_id', as: 'InvoiceItems', onDelete: 'CASCADE' });
+// Liên kết Kỳ thu
+BillingPeriod.hasMany(Invoice, { foreignKey: 'billing_period_id' });
+Invoice.belongsTo(BillingPeriod, { foreignKey: 'billing_period_id' });
+
+// --- Chi tiết Hóa đơn (Items) ---
+Invoice.hasMany(InvoiceItem, { foreignKey: 'invoice_id', onDelete: 'CASCADE' });
 InvoiceItem.belongsTo(Invoice, { foreignKey: 'invoice_id' });
 
 FeeType.hasMany(InvoiceItem, { foreignKey: 'fee_type_id' });
 InvoiceItem.belongsTo(FeeType, { foreignKey: 'fee_type_id' });
 
-// --- Thanh toán (Payment) ---
-Invoice.hasMany(Payment, { foreignKey: 'invoice_id', as: 'Payments' });
+// --- Thanh toán ---
+Invoice.hasMany(Payment, { foreignKey: 'invoice_id' });
 Payment.belongsTo(Invoice, { foreignKey: 'invoice_id' });
 
 // 3. Export
@@ -61,20 +73,20 @@ module.exports = {
   FeeType,
   FeeConfig,
   BillingPeriod,
-  Usage,
+  MeterReading, // Export tên mới
   Invoice,
   InvoiceItem,
   Payment,
   User,
+  UserProfile,
   
-  // Hàm sync database (Cẩn thận khi dùng force: true sẽ mất dữ liệu)
   syncDB: async () => {
     try {
       await sequelize.authenticate();
-      console.log('✅ Connection has been established successfully.');
-      // await sequelize.sync({ alter: true }); // Chỉ bật khi cần update cấu trúc
+      console.log('✅ Kết nối CSDL thành công.');
+      // await sequelize.sync({ alter: true }); // Bật khi cần sửa cấu trúc tự động (thận trọng)
     } catch (error) {
-      console.error('❌ Unable to connect to the database:', error);
+      console.error('❌ Kết nối thất bại:', error);
     }
   }
 };

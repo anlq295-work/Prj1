@@ -5,16 +5,20 @@ const FeeConfig = sequelize.define('FeeConfig', {
   id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
   fee_type_id: { 
     type: DataTypes.INTEGER,
-    allowNull: false,
-    references: { model: 'fee_types', key: 'id' }
+    allowNull: false
   },
-  unit_price: { type: DataTypes.FLOAT, defaultValue: 0 },
-  // Giữ lại cấu hình tính toán đặc thù
-  calc_method: { type: DataTypes.STRING, defaultValue: 'FLAT' }, 
-  tier_config: { type: DataTypes.JSONB }, 
+  name: { type: DataTypes.STRING, allowNull: false },
+  // Enum khai báo trong code để validate, dưới DB vẫn lưu string
+  calc_method: { 
+      type: DataTypes.ENUM('FIXED', 'TIERED'), 
+      allowNull: false 
+  }, 
+  tier_config: { type: DataTypes.JSONB }, // Quan trọng: JSONB
+  unit_price: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 }, // Tiền là Decimal
   is_active: { type: DataTypes.BOOLEAN, defaultValue: true }
 }, {
-  tableName: 'FeeConfigs',
+  tableName: 'fee_configs',
+  underscored: true,
   timestamps: true
 });
 

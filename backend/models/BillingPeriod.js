@@ -7,11 +7,10 @@ const BillingPeriod = sequelize.define('BillingPeriod', {
   year: { type: DataTypes.INTEGER, allowNull: false },
   start_date: { type: DataTypes.DATEONLY },
   end_date: { type: DataTypes.DATEONLY },
-  status: { type: DataTypes.STRING, defaultValue: 'OPEN' } // OPEN, CLOSED
+  status: { type: DataTypes.STRING, defaultValue: 'OPEN' } 
 }, {
   tableName: 'billing_periods',
-  timestamps: false,
-  indexes: [{ unique: true, fields: ['month', 'year'] }]
+  timestamps: false
 });
 
 module.exports = BillingPeriod;

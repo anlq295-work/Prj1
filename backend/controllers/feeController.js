@@ -1,12 +1,12 @@
 const { FeeConfig, FeeType, sequelize } = require('../models');
 
-// 1. LẤY DANH SÁCH PHÍ
+// 1. LẤY DANH SÁCH CẤU HÌNH PHÍ
 exports.getAllFees = async (req, res) => {
   try {
     const fees = await FeeConfig.findAll({
-      // QUAN TRỌNG: Phải include FeeType để lấy tên và đơn vị chuẩn
-      include: [{ model: FeeType }], 
-      order: [['updatedAt', 'DESC']]
+      where: { is_active: true }, // Chỉ lấy cái đang hiện hành
+      include: [{ model: FeeType }], // Join để lấy tên (Ví dụ: "Điện sinh hoạt")
+      order: [['updated_at', 'DESC']]
     });
     res.json(fees);
   } catch (err) {
@@ -15,109 +15,69 @@ exports.getAllFees = async (req, res) => {
   }
 };
 
-// 2. TẠO MỚI PHÍ
+// 2. LẤY DANH SÁCH LOẠI PHÍ (Để đổ vào Dropdown khi tạo mới)
+exports.getFeeTypes = async (req, res) => {
+    try {
+        const types = await FeeType.findAll({ order: [['name', 'ASC']] });
+        res.json(types);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// 3. TẠO CẤU HÌNH PHÍ MỚI
 exports.createFee = async (req, res) => {
-  const t = await sequelize.transaction();
   try {
-    const { name, unit, category, unit_price, calc_method, tier_config } = req.body;
+    const { name, fee_type_id, calc_method, unit_price, tier_config } = req.body;
 
-    // B1: Tìm hoặc tạo FeeType trước (Chuẩn hóa tên)
-    const [feeType] = await FeeType.findOrCreate({
-      where: { name: name },
-      defaults: {
-        name,
-        unit: unit || 'tháng',
-        category: category || 'FIXED',
-        description: 'Cấu hình từ trang quản lý'
-      },
-      transaction: t
-    });
+    // Validate cơ bản
+    if (!fee_type_id) return res.status(400).json({ message: "Phải chọn loại phí!" });
 
-    // B2: Tạo FeeConfig trỏ vào FeeType đó
     const newConfig = await FeeConfig.create({
-      fee_type_id: feeType.id,
-      name: name, // Vẫn lưu tên ở đây để dễ debug
-      unit_price: unit_price || 0,
-      calc_method,
-      tier_config,
+      name, // Tên bảng giá (VD: Giá điện 2024)
+      fee_type_id,
+      calc_method, // 'FIXED' hoặc 'TIERED'
+      unit_price: calc_method === 'FIXED' ? unit_price : 0,
+      tier_config: calc_method === 'TIERED' ? tier_config : null,
       is_active: true
-    }, { transaction: t });
-
-    await t.commit();
-
-    // Trả về bản ghi đầy đủ với FeeType
-    const finalConfig = await FeeConfig.findByPk(newConfig.id, {
-      include: [{ model: FeeType }]
     });
 
-    res.status(201).json(finalConfig);
+    // Trả về kèm thông tin FeeType
+    const result = await FeeConfig.findByPk(newConfig.id, { include: [FeeType] });
+    res.status(201).json(result);
   } catch (err) {
-    await t.rollback();
     res.status(500).json({ error: err.message });
   }
 };
 
-// 3. CẬP NHẬT PHÍ
+// 4. CẬP NHẬT CẤU HÌNH
 exports.updateFee = async (req, res) => {
   const { id } = req.params;
-  const { name, unit, unit_price, calc_method, tier_config } = req.body;
+  const { name, unit_price, calc_method, tier_config, is_active } = req.body;
   
-  const t = await sequelize.transaction();
   try {
-    const config = await FeeConfig.findByPk(id, { transaction: t });
-    if (!config) throw new Error("Không tìm thấy cấu hình phí");
+    const config = await FeeConfig.findByPk(id);
+    if (!config) return res.status(404).json({ message: "Không tìm thấy cấu hình" });
 
-    // Cập nhật bảng Config
-    config.unit_price = unit_price;
-    config.calc_method = calc_method;
-    config.tier_config = tier_config;
-    
-    // Nếu đổi tên, phải tìm hoặc tạo FeeType mới và trỏ FeeConfig sang
-    if (name && name !== config.name) {
-        const [feeType] = await FeeType.findOrCreate({
-            where: { name: name },
-            defaults: {
-                name,
-                unit: unit || 'tháng', // Giữ lại unit cũ hoặc mặc định
-                category: 'FIXED', // Giả định
-                description: 'Cấu hình từ trang quản lý (cập nhật)'
-            },
-            transaction: t
-        });
-        config.fee_type_id = feeType.id;
-        config.name = name; // Cập nhật tên trên FeeConfig cũng để dễ debug
-    }
+    // Cập nhật
+    config.name = name || config.name;
+    config.calc_method = calc_method || config.calc_method;
+    config.tier_config = tier_config || config.tier_config;
+    config.unit_price = unit_price !== undefined ? unit_price : config.unit_price;
+    config.is_active = is_active !== undefined ? is_active : config.is_active;
 
-    // LUÔN CẬP NHẬT ĐƠN VỊ TÍNH CỦA BẢNG CHUẨN
-    if (unit) {
-        await FeeType.update(
-            { unit: unit },
-            { where: { id: config.fee_type_id }, transaction: t }
-        );
-    }
-
-    await config.save({ transaction: t });
-    await t.commit();
-    
-    // Trả về bản ghi đầy đủ với FeeType
-    const finalConfig = await FeeConfig.findByPk(config.id, {
-      include: [{ model: FeeType }]
-    });
-
-    res.json(finalConfig);
+    await config.save();
+    res.json(config);
   } catch (err) {
-    await t.rollback();
     res.status(500).json({ error: err.message });
   }
 };
 
-// 4. XÓA PHÍ
 exports.deleteFee = async (req, res) => {
-  try {
-    // Chỉ xóa cấu hình giá, không xóa Loại phí (vì có thể dùng cho lịch sử cũ)
-    await FeeConfig.destroy({ where: { id: req.params.id } });
-    res.json({ message: "Đã xóa cấu hình phí" });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
+    try {
+        await FeeConfig.destroy({ where: { id: req.params.id } });
+        res.json({ message: "Đã xóa thành công" });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+}

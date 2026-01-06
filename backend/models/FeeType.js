@@ -3,13 +3,13 @@ const sequelize = require('../config/database');
 
 const FeeType = sequelize.define('FeeType', {
   id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
-  name: { type: DataTypes.STRING, allowNull: false, unique: true }, // Tiền điện, Phí QL
-  category: { type: DataTypes.STRING, allowNull: false }, // METER, FIXED, VOLUNTARY
-  unit: { type: DataTypes.STRING }, // kWh, m3, tháng
+  name: { type: DataTypes.STRING, allowNull: false, unique: true },
+  category: { type: DataTypes.STRING, allowNull: false }, // UTILITY, SERVICE...
+  unit: { type: DataTypes.STRING }, 
   description: { type: DataTypes.TEXT }
 }, {
   tableName: 'fee_types',
-  timestamps: false
+  timestamps: false // Bảng này không cần created_at
 });
 
 module.exports = FeeType;

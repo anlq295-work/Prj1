@@ -1,111 +1,66 @@
-// services/BillCalculator.js
-const { Op } = require('sequelize');
-const FeeConfig = require('../models/FeeConfig');
-
 /**
- * Hàm tính tiền theo bậc thang (Logic cốt lõi)
+ * HÀM TÍNH TIỀN BẬC THANG (Logic cốt lõi)
+ * Input: 
+ * - usage: Số lượng tiêu thụ (VD: 120 kWh)
+ * - tierConfig: Array JSON cấu hình ([{from: 0, to: 50, price: 1678}, ...])
  */
 const calculateTieredFee = (usage, tierConfig) => {
-  if (!tierConfig || !Array.isArray(tierConfig) || usage <= 0) return 0;
+  // 1. Kiểm tra đầu vào an toàn
+  if (!tierConfig || !Array.isArray(tierConfig) || usage <= 0) {
+    return { total: 0, breakdown: [] };
+  }
+
+  // 2. Sắp xếp bậc thang để đảm bảo tính đúng thứ tự (từ thấp đến cao)
+  const sortedTiers = tierConfig.sort((a, b) => a.from - b.from);
 
   let totalAmount = 0;
   let remainingUsage = usage;
-  let previousLimit = 0;
-  let breakdown = []; // Lưu chi tiết để hiển thị ra frontend
+  let breakdown = []; // Mảng lưu chi tiết từng bậc để in hóa đơn
 
-  for (let i = 0; i < tierConfig.length; i++) {
-    const tier = tierConfig[i];
-    const limit = tier.limit; // Ngưỡng trên (có thể là null nếu là bậc cuối)
-    const price = tier.price;
-
+  for (let i = 0; i < sortedTiers.length; i++) {
+    const tier = sortedTiers[i];
+    
+    // Nếu đã tính hết số lượng dùng thì dừng
     if (remainingUsage <= 0) break;
 
-    let usageInTier;
+    // Tính độ rộng của bậc này
+    let availableInTier;
     
-    // Nếu limit là null (vô cực) hoặc còn lại ít hơn khoảng bậc
-    if (limit === null) {
-      usageInTier = remainingUsage;
+    // Nếu "to" là null hoặc 0 -> Coi như là bậc cuối (vô cùng)
+    if (!tier.to) {
+      availableInTier = remainingUsage;
     } else {
-      const gap = limit - previousLimit;
-      usageInTier = Math.min(remainingUsage, gap);
+      // Logic: (Đến số - Từ số + 1). VD: 0->50 là 51 số.
+      // Nếu muốn chính xác theo kiểu điện lực (0-50 là 50 số), bạn có thể chỉnh lại công thức ở đây.
+      // Với config hiện tại: 0-50, 51-100... thì dùng công thức dưới là an toàn:
+      availableInTier = tier.to - tier.from + 1;
+      
+      // Fix edge case nếu bậc đầu tiên bắt đầu từ 0
+      if (tier.from === 0) availableInTier = tier.to; 
     }
 
-    const cost = usageInTier * price;
+    // Số lượng thực tế tính tiền ở bậc này = Min(Số còn lại, Độ rộng bậc)
+    const usageInTier = Math.min(remainingUsage, availableInTier);
+
+    // Tính tiền
+    const cost = usageInTier * tier.price;
     totalAmount += cost;
-    
+
+    // Lưu chi tiết (Snapshost)
     breakdown.push({
       tierIndex: i + 1,
+      from: tier.from,
+      to: tier.to || 'Trở lên',
+      price: tier.price,
       usage: usageInTier,
-      price: price,
       cost: cost
     });
 
+    // Trừ đi số lượng đã tính
     remainingUsage -= usageInTier;
-    if (limit !== null) previousLimit = limit;
   }
 
   return { total: totalAmount, breakdown };
 };
 
-/**
- * Hàm tạo chi tiết hóa đơn cho 1 phòng
- */
-const calculateRoomBill = async (roomData) => {
-  // roomData gồm: { area: 30, electric_usage: 450, water_usage: 25, ... }
-  
-  // 1. Lấy tất cả loại phí đang kích hoạt
-  const activeFees = await FeeConfig.findAll({ where: { is_active: true } });
-  
-  const billDetails = [];
-  let totalBill = 0;
-
-  for (const fee of activeFees) {
-    let amount = 0;
-    let note = '';
-    let tieredDetails = null;
-
-    switch (fee.calc_method) {
-      case 'FLAT': // Cố định
-        amount = fee.unit_price;
-        break;
-
-      case 'PER_M2': // Theo diện tích
-        amount = (fee.unit_price || 0) * (roomData.area || 0);
-        note = `${roomData.area} m2 x ${fee.unit_price}`;
-        break;
-
-      case 'PER_UNIT': // Theo chỉ số (đồng giá)
-        const usage = fee.name.toLowerCase().includes('điện') ? roomData.electric_usage 
-                    : fee.name.toLowerCase().includes('nước') ? roomData.water_usage 
-                    : 0;
-        amount = usage * (fee.unit_price || 0);
-        note = `${usage} ${fee.unit || ''} x ${fee.unit_price}`;
-        break;
-
-      case 'TIERED': // Lũy tiến (Mới)
-        const tieredUsage = fee.name.toLowerCase().includes('điện') ? roomData.electric_usage 
-                          : fee.name.toLowerCase().includes('nước') ? roomData.water_usage 
-                          : 0;
-        
-        // Gọi hàm tính toán riêng
-        const result = calculateTieredFee(tieredUsage, fee.tier_config);
-        amount = result.total;
-        tieredDetails = result.breakdown; // Lưu lại để frontend hiển thị
-        note = `Lũy tiến (${tieredUsage} ${fee.unit || ''})`;
-        break;
-    }
-
-    totalBill += amount;
-    billDetails.push({
-      fee_id: fee.id,
-      fee_name: fee.name,
-      amount: amount,
-      note: note,
-      tieredDetails: tieredDetails // Trả về breakdown cho client
-    });
-  }
-
-  return { total: totalBill, details: billDetails };
-};
-
-module.exports = { calculateRoomBill };
+module.exports = { calculateTieredFee };

@@ -13,9 +13,9 @@ export default function FeeManager() {
   // State form
   const [formData, setFormData] = useState({
     name: '',
-    calc_method: 'FLAT', // FLAT, PER_M2, PER_UNIT, TIERED
-    price: '', 
     unit: '',
+    price: '', 
+    calc_method: 'FLAT', // FLAT, PER_M2, PER_UNIT, TIERED   
     tier_config: [],
     // Thêm category cho FeeType mới
     category: 'FIXED' 

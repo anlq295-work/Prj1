@@ -1,45 +1,41 @@
-const { Usage, Apartment, BillingPeriod, FeeType } = require('../models');
+const { MeterReading, Apartment, BillingPeriod, FeeType, sequelize } = require('../models');
+const { Op } = require('sequelize');
 
-// API: Lấy danh sách chỉ số (Pivot dữ liệu để hiển thị ngang trên UI)
+// 1. LẤY CHỈ SỐ (PIVOT DATA)
 exports.getUsages = async (req, res) => {
     const { month, year } = req.query;
     try {
-        // 1. Lấy tất cả căn hộ
+        // Lấy tất cả căn hộ
         const apartments = await Apartment.findAll({ order: [['code', 'ASC']] });
         
-        // 2. Tìm kỳ thu (nếu chưa có thì thôi)
+        // Tìm kỳ thu
         const period = await BillingPeriod.findOne({ where: { month, year } });
         
-        // 3. Lấy tất cả Usage của kỳ này (nếu có)
-        let usages = [];
+        let readings = [];
         if (period) {
-            usages = await Usage.findAll({ 
+            readings = await MeterReading.findAll({ 
                 where: { billing_period_id: period.id },
                 include: [{ model: FeeType }]
             });
         }
 
-        // 4. Biến đổi dữ liệu (Pivot) để trả về Frontend
-        // Frontend cần: { apartment_code, old_electric, new_electric, old_water, new_water }
+        // Pivot dữ liệu: Mỗi căn hộ 1 dòng, có cột old_electric, new_electric...
         const result = apartments.map(apt => {
-            // Tìm usage của căn này
-            const aptUsages = usages.filter(u => u.apartment_id === apt.id);
+            const aptReadings = readings.filter(r => r.apartment_id === apt.id);
             
-            // Tìm cụ thể điện và nước
-            const electric = aptUsages.find(u => u.FeeType.name.toLowerCase().includes('điện'));
-            const water = aptUsages.find(u => u.FeeType.name.toLowerCase().includes('nước'));
+            // Tìm theo category hoặc tên (Khuyên dùng category trong DB mới)
+            const electric = aptReadings.find(r => r.FeeType.category === 'UTILITY' && r.FeeType.name.toLowerCase().includes('điện'));
+            const water = aptReadings.find(r => r.FeeType.category === 'UTILITY' && r.FeeType.name.toLowerCase().includes('nước'));
 
             return {
-                apartment_code: apt.code,
                 apartment_id: apt.id,
+                apartment_code: apt.code,
                 // Điện
-                old_electric: electric ? electric.old_value : 0,
-                new_electric: electric ? electric.new_value : 0,
+                electric_old: electric ? electric.old_value : 0,
+                electric_new: electric ? electric.new_value : 0,
                 // Nước
-                old_water: water ? water.old_value : 0,
-                new_water: water ? water.new_value : 0,
-                
-                saved: aptUsages.length > 0
+                water_old: water ? water.old_value : 0,
+                water_new: water ? water.new_value : 0,
             };
         });
 
@@ -50,48 +46,53 @@ exports.getUsages = async (req, res) => {
     }
 };
 
-// API: Lưu chỉ số
+// 2. LƯU CHỈ SỐ
 exports.saveUsages = async (req, res) => {
-    const { month, year, data } = req.body; // data là mảng từ frontend
+    const { month, year, data } = req.body; 
+    const t = await sequelize.transaction();
+
     try {
-        // 1. Tìm hoặc tạo Kỳ Thu
+        // Tìm/Tạo kỳ thu
         const [period] = await BillingPeriod.findOrCreate({
             where: { month, year },
-            defaults: { month, year, status: 'OPEN' }
+            defaults: { status: 'OPEN' },
+            transaction: t
         });
 
-        // 2. Lấy ID của loại phí Điện và Nước
-        const electricType = await FeeType.findOne({ where: { name: 'Tiền điện' } }); // Đảm bảo tên đúng trong DB
-        const waterType = await FeeType.findOne({ where: { name: 'Tiền nước' } });
+        // Lấy ID FeeType (Nên cache hoặc define const để tối ưu)
+        const electricType = await FeeType.findOne({ where: { name: 'Điện sinh hoạt' } });
+        const waterType = await FeeType.findOne({ where: { name: 'Nước sạch' } });
 
-        if (!electricType || !waterType) {
-            return res.status(400).json({ message: "Chưa cấu hình loại phí 'Tiền điện' hoặc 'Tiền nước' trong hệ thống." });
-        }
+        if (!electricType || !waterType) throw new Error("Chưa cấu hình loại phí Điện/Nước");
 
-        // 3. Lưu từng dòng
         for (const item of data) {
-            // Lưu Điện
-            await Usage.upsert({
-                apartment_id: item.apartment_id, // Frontend cần gửi kèm ID này, hoặc query từ code
-                fee_type_id: electricType.id,
-                billing_period_id: period.id,
-                old_value: item.old_electric,
-                new_value: item.new_electric
-            }); // Note: upsert của Postgres cần unique constraint (đã tạo ở bước SQL)
+            // Upsert Điện
+            if (item.electric_new !== undefined) {
+                await MeterReading.upsert({
+                    apartment_id: item.apartment_id,
+                    fee_type_id: electricType.id,
+                    billing_period_id: period.id,
+                    old_value: item.electric_old,
+                    new_value: item.electric_new
+                }, { transaction: t });
+            }
 
-            // Lưu Nước
-            await Usage.upsert({
-                apartment_id: item.apartment_id,
-                fee_type_id: waterType.id,
-                billing_period_id: period.id,
-                old_value: item.old_water,
-                new_value: item.new_water
-            });
+            // Upsert Nước
+            if (item.water_new !== undefined) {
+                await MeterReading.upsert({
+                    apartment_id: item.apartment_id,
+                    fee_type_id: waterType.id,
+                    billing_period_id: period.id,
+                    old_value: item.water_old,
+                    new_value: item.water_new
+                }, { transaction: t });
+            }
         }
 
+        await t.commit();
         res.json({ message: "Đã lưu chỉ số thành công!" });
     } catch (err) {
-        console.error(err);
+        await t.rollback();
         res.status(500).json({ error: err.message });
     }
 };
