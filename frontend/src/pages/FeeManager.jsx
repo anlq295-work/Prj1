@@ -1,366 +1,205 @@
-// src/pages/FeeManager.jsx
 import React, { useState, useEffect } from 'react';
-import { Plus, Trash2, Edit, CheckCircle, XCircle, Save, X, Zap, DollarSign, Maximize, Layers, Tag } from 'lucide-react';
-import api from '../api';
+import { getFees, getFeeTypes, createFee, updateFee, deleteFee } from '../api';
+import { Trash2, Edit, Plus, Save, X } from 'lucide-react';
 
-export default function FeeManager() {
+const FeeManager = () => {
   const [fees, setFees] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [feeTypes, setFeeTypes] = useState([]); // List loại phí (Điện, Nước...)
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingFee, setEditingFee] = useState(null);
 
-  const [isFormOpen, setIsFormOpen] = useState(false);
-  const [editingId, setEditingId] = useState(null);
-
-  // State form
+  // Form State
   const [formData, setFormData] = useState({
     name: '',
-    unit: '',
-    price: '', 
-    calc_method: 'FLAT', // FLAT, PER_M2, PER_UNIT, TIERED   
-    tier_config: [],
-    // Thêm category cho FeeType mới
-    category: 'FIXED' 
+    fee_type_id: '',
+    calc_method: 'FIXED', // FIXED hoặc TIERED
+    unit_price: 0,
+    tier_config: [{ from: 0, to: '', price: 0 }] // Mặc định 1 bậc
   });
 
-  const [tiers, setTiers] = useState([{ limit: '', price: '' }]);
-
   useEffect(() => {
-    fetchFees();
+    loadData();
   }, []);
 
-  const mapApiFeeToState = (f) => {
-    // Parse Tier Config an toàn
-    let tierConfig = [];
+  const loadData = async () => {
     try {
-        tierConfig = typeof f.tier_config === 'string' ? JSON.parse(f.tier_config) : (f.tier_config || []);
-    } catch (e) {}
-
-    // --- LOGIC QUAN TRỌNG: FALLBACK DỮ LIỆU ---
-    const realName = f.FeeType?.name || f.name || 'Chưa đặt tên';
-    const realUnit = f.FeeType?.unit || guessUnit(f.calc_method, realName);
-    const realCategory = f.FeeType?.category || 'FIXED';
-
-    return {
-      id: f.id,
-      fee_type_id: f.fee_type_id,
-      name: realName, 
-      category: realCategory,
-      price: f.unit_price || 0,
-      unit: realUnit,
-      calc_method: f.calc_method,
-      tier_config: tierConfig,
-      active: f.is_active
-    };
-  };
-
-  const fetchFees = async () => {
-    try {
-      const response = await api.get('/fees');
-      const mappedFees = response.data.map(mapApiFeeToState);
-      setFees(mappedFees);
+      const [resFees, resTypes] = await Promise.all([getFees(), getFeeTypes()]);
+      setFees(resFees.data);
+      setFeeTypes(resTypes.data);
     } catch (error) {
-      console.error("Lỗi tải danh sách phí:", error);
-    } finally {
-      setLoading(false);
+      console.error("Lỗi tải dữ liệu:", error);
     }
   };
 
-  // Hàm phụ trợ đoán đơn vị nếu DB bị null
-  const guessUnit = (method, name) => {
-      const n = name.toLowerCase();
-      if (method === 'PER_M2') return 'm2';
-      if (n.includes('điện')) return 'kWh';
-      if (n.includes('nước')) return 'm3';
-      return 'tháng';
+  // Xử lý thay đổi input thường
+  const handleChange = (e) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({ ...prev, [name]: value }));
   };
 
+  // Xử lý thay đổi cấu hình bậc thang (Tier Config)
   const handleTierChange = (index, field, value) => {
-    const newTiers = [...tiers];
-    newTiers[index][field] = value;
-    setTiers(newTiers);
+    const newTiers = [...formData.tier_config];
+    newTiers[index][field] = value === '' ? '' : parseFloat(value);
+    setFormData(prev => ({ ...prev, tier_config: newTiers }));
   };
 
   const addTier = () => {
-    setTiers([...tiers, { limit: '', price: '' }]);
+    setFormData(prev => ({
+      ...prev,
+      tier_config: [...prev.tier_config, { from: 0, to: '', price: 0 }]
+    }));
   };
 
   const removeTier = (index) => {
-    const newTiers = tiers.filter((_, i) => i !== index);
-    setTiers(newTiers);
+    const newTiers = formData.tier_config.filter((_, i) => i !== index);
+    setFormData(prev => ({ ...prev, tier_config: newTiers }));
   };
 
-  const handleSave = async (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-
-    let finalTierConfig = null;
-    let finalPrice = parseFloat(formData.price);
-
-    if (formData.calc_method === 'TIERED') {
-      finalTierConfig = tiers.map(t => ({
-        limit: t.limit ? parseFloat(t.limit) : null, 
-        price: parseFloat(t.price)
-      }));
-      finalPrice = 0; 
-    }
-
-    // Logic category tự động
-    let category = 'FIXED';
-    if (formData.calc_method === 'TIERED' || formData.calc_method === 'PER_UNIT') category = 'METER';
-    else if (formData.calc_method === 'PER_M2') category = 'FIXED';
-
-    const payload = {
-      name: formData.name, // Sẽ tạo FeeType nếu chưa có
-      unit_price: finalPrice,
-      calc_method: formData.calc_method,
-      tier_config: finalTierConfig,
-      category: category,
-      unit: formData.unit, 
-      is_active: true
-    };
-
     try {
-      if (editingId) {
-        const response = await api.put(`/fees/${editingId}`, payload);
-        const updatedFee = mapApiFeeToState(response.data);
-        setFees(fees.map(f => f.id === editingId ? updatedFee : f));
-        alert('Cập nhật thành công!');
+      // Chuẩn hóa dữ liệu trước khi gửi
+      const payload = {
+        ...formData,
+        unit_price: formData.calc_method === 'FIXED' ? parseFloat(formData.unit_price) : 0,
+        tier_config: formData.calc_method === 'TIERED' ? formData.tier_config : null
+      };
+
+      if (editingFee) {
+        await updateFee(editingFee.id, payload);
       } else {
-        const response = await api.post('/fees', payload);
-        const newFee = mapApiFeeToState(response.data);
-        setFees([newFee, ...fees]);
-        alert('Thêm mới thành công!');
+        await createFee(payload);
       }
-      closeForm();
+      setIsModalOpen(false);
+      loadData();
     } catch (error) {
-      alert('Lỗi: ' + (error.response?.data?.message || error.message));
+      alert("Lỗi lưu cấu hình: " + (error.response?.data?.message || error.message));
     }
   };
 
-  const handleDelete = async (id) => {
-    if (window.confirm('Bạn có chắc muốn xóa loại phí này?')) {
-      try {
-        await api.delete(`/fees/${id}`);
-        fetchFees();
-      } catch (error) {
-        alert('Lỗi: ' + error.message);
-      }
-    }
-  };
-
-  const handleStartAdd = () => {
-    setEditingId(null);
-    setFormData({ name: '', calc_method: 'FLAT', price: '', unit: '', tier_config: [], category: 'FIXED' });
-    setTiers([{ limit: '', price: '' }]);
-    setIsFormOpen(true);
-  };
-
-  const handleStartEdit = (fee) => {
-    setEditingId(fee.id);
+  const openEdit = (fee) => {
+    setEditingFee(fee);
     setFormData({
       name: fee.name,
+      fee_type_id: fee.fee_type_id,
       calc_method: fee.calc_method,
-      price: fee.price,
-      unit: fee.unit,
-      tier_config: fee.tier_config || [],
-      category: fee.category
+      unit_price: fee.unit_price || 0,
+      tier_config: fee.tier_config || [{ from: 0, to: '', price: 0 }]
     });
-    
-    if (fee.calc_method === 'TIERED' && fee.tier_config) {
-      setTiers(fee.tier_config);
-    } else {
-      setTiers([{ limit: '', price: '' }]);
-    }
-    
-    setIsFormOpen(true);
+    setIsModalOpen(true);
   };
-
-  const closeForm = () => {
-    setIsFormOpen(false);
-    setEditingId(null);
-  };
-
-  const renderTypeBadge = (method) => {
-    switch (method) {
-      case 'TIERED':
-        return <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-bold bg-purple-100 text-purple-800 border border-purple-200"><Layers size={12} /> Lũy tiến</span>;
-      case 'PER_UNIT':
-        return <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-bold bg-yellow-100 text-yellow-800 border border-yellow-200"><Zap size={12} /> Theo chỉ số</span>;
-      case 'PER_M2':
-        return <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-bold bg-blue-100 text-blue-800 border border-blue-200"><Maximize size={12} /> Theo diện tích</span>;
-      default:
-        return <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-bold bg-gray-100 text-gray-600 border border-gray-200"><DollarSign size={12} /> Cố định</span>;
-    }
-  };
-
-  if (loading) return <div className="p-8 text-center text-gray-500">Đang tải dữ liệu...</div>;
 
   return (
-    <div>
-      <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-bold text-gray-800">Cấu hình biểu phí</h2>
-        <button onClick={handleStartAdd} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded flex items-center gap-2 shadow transition">
-          <Plus size={18} /> Thêm loại phí
+    <div className="p-6">
+      <div className="flex justify-between mb-6">
+        <h1 className="text-2xl font-bold">Quản lý Cấu hình Phí</h1>
+        <button onClick={() => { setEditingFee(null); setIsModalOpen(true); }} className="bg-blue-600 text-white px-4 py-2 rounded flex items-center gap-2">
+          <Plus size={18} /> Thêm Mới
         </button>
       </div>
 
-      {isFormOpen && (
-        <div className="fixed inset-0 bg-black bg-opacity-40 flex justify-center items-center z-50 px-4 backdrop-blur-sm">
-          <form onSubmit={handleSave} className="bg-white p-6 rounded-xl shadow-2xl w-full max-w-2xl border-t-4 border-blue-600 relative max-h-[90vh] overflow-y-auto animate-in fade-in zoom-in duration-200">
-            <button type="button" onClick={closeForm} className="absolute top-4 right-4 text-gray-400 hover:text-red-500"><X size={24} /></button>
-            <h3 className="font-bold text-xl mb-6 text-gray-800 flex items-center gap-2">
-              {editingId ? <Edit size={24} className="text-blue-600" /> : <Plus size={24} className="text-green-600" />}
-              {editingId ? 'Chỉnh sửa phí' : 'Thêm phí mới'}
-            </h3>
-
-            <div className="space-y-6">
-              <div>
-                <label className="block text-sm font-bold text-gray-700 mb-3">Cách tính phí:</label>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  <div onClick={() => setFormData({ ...formData, calc_method: 'FLAT', unit: 'tháng' })}
-                    className={`cursor-pointer border rounded-lg p-3 flex flex-col items-center gap-2 transition ${formData.calc_method === 'FLAT' ? 'bg-gray-100 border-gray-500 ring-1 ring-gray-500' : 'hover:bg-gray-50'}`}>
-                    <DollarSign size={20} className="text-gray-600" />
-                    <span className="text-xs font-bold">Cố định</span>
-                  </div>
-                  <div onClick={() => setFormData({ ...formData, calc_method: 'PER_M2', unit: 'm2' })}
-                    className={`cursor-pointer border rounded-lg p-3 flex flex-col items-center gap-2 transition ${formData.calc_method === 'PER_M2' ? 'bg-blue-50 border-blue-500 ring-1 ring-blue-500' : 'hover:bg-gray-50'}`}>
-                    <Maximize size={20} className="text-blue-600" />
-                    <span className="text-xs font-bold">Diện tích</span>
-                  </div>
-                  <div onClick={() => setFormData({ ...formData, calc_method: 'PER_UNIT', unit: 'kWh' })}
-                    className={`cursor-pointer border rounded-lg p-3 flex flex-col items-center gap-2 transition ${formData.calc_method === 'PER_UNIT' ? 'bg-yellow-50 border-yellow-500 ring-1 ring-yellow-500' : 'hover:bg-gray-50'}`}>
-                    <Zap size={20} className="text-yellow-600" />
-                    <span className="text-xs font-bold">Chỉ số</span>
-                  </div>
-                  <div onClick={() => setFormData({ ...formData, calc_method: 'TIERED', unit: 'kWh' })}
-                    className={`cursor-pointer border rounded-lg p-3 flex flex-col items-center gap-2 transition ${formData.calc_method === 'TIERED' ? 'bg-purple-50 border-purple-500 ring-1 ring-purple-500' : 'hover:bg-gray-50'}`}>
-                    <Layers size={20} className="text-purple-600" />
-                    <span className="text-xs font-bold">Lũy tiến</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Tên loại phí</label>
-                  <input required placeholder="VD: Tiền điện sinh hoạt" className="w-full border border-gray-300 p-2.5 rounded-lg outline-none focus:border-blue-500" value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })} />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Đơn vị tính</label>
-                  <input required placeholder="kWh, m3, tháng, m2..." className="w-full border border-gray-300 p-2.5 rounded-lg outline-none focus:border-blue-500" value={formData.unit} onChange={e => setFormData({ ...formData, unit: e.target.value })} />
-                </div>
-              </div>
-
-              {formData.calc_method !== 'TIERED' ? (
-                <div>
-                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                      {formData.calc_method === 'FLAT' ? 'Số tiền trọn gói' : 'Đơn giá / Tỷ giá'} (VNĐ)
-                   </label>
-                   <input required type="number" className="w-full border border-gray-300 p-2.5 rounded-lg outline-none font-bold text-gray-700 focus:border-blue-500" 
-                          value={formData.price} onChange={e => setFormData({ ...formData, price: e.target.value })} />
-                </div>
-              ) : (
-                <div className="bg-purple-50 p-4 rounded-lg border border-purple-100">
-                  <div className="flex justify-between items-center mb-2">
-                     <label className="block text-sm font-bold text-purple-800">Cấu hình bậc thang giá</label>
-                     <button type="button" onClick={addTier} className="text-xs bg-purple-200 text-purple-800 px-2 py-1 rounded hover:bg-purple-300 font-bold">+ Thêm bậc</button>
-                  </div>
-                  <div className="space-y-2">
-                    <div className="grid grid-cols-10 gap-2 text-xs font-semibold text-gray-500">
-                      <div className="col-span-1 text-center">Bậc</div>
-                      <div className="col-span-4">Mức sử dụng đến (Max)</div>
-                      <div className="col-span-4">Đơn giá (VNĐ)</div>
-                      <div className="col-span-1"></div>
-                    </div>
-                    {tiers.map((tier, index) => (
-                      <div key={index} className="grid grid-cols-10 gap-2 items-center">
-                        <div className="col-span-1 text-center font-bold text-gray-400">{index + 1}</div>
-                        <div className="col-span-4">
-                          <input 
-                            type="number" 
-                            placeholder={index === tiers.length - 1 ? "Vô cực" : "VD: 50"} 
-                            className="w-full border border-gray-300 p-2 rounded text-sm focus:border-purple-500 outline-none"
-                            value={tier.limit || ''}
-                            onChange={(e) => handleTierChange(index, 'limit', e.target.value)}
-                          />
-                        </div>
-                        <div className="col-span-4">
-                          <input 
-                            required type="number" 
-                            placeholder="Giá bậc này" 
-                            className="w-full border border-gray-300 p-2 rounded text-sm font-bold text-gray-700 focus:border-purple-500 outline-none"
-                            value={tier.price}
-                            onChange={(e) => handleTierChange(index, 'price', e.target.value)}
-                          />
-                        </div>
-                        <div className="col-span-1 text-center">
-                           {tiers.length > 1 && (
-                             <button type="button" onClick={() => removeTier(index)} className="text-red-400 hover:text-red-600"><XCircle size={18}/></button>
-                           )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="flex gap-3 justify-end mt-8 border-t pt-4">
-              <button type="button" onClick={closeForm} className="px-5 py-2 text-gray-600 hover:bg-gray-100 rounded-lg">Hủy</button>
-              <button type="submit" className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-bold shadow flex items-center gap-2">
-                <Save size={18} /> Lưu cấu hình
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-        <table className="w-full text-left border-collapse">
-          <thead className="bg-gray-50 text-gray-600 uppercase text-xs font-bold">
+      <div className="bg-white rounded shadow overflow-hidden">
+        <table className="w-full">
+          <thead className="bg-gray-100">
             <tr>
-              <th className="p-4 border-b">Tên phí</th>
-              <th className="p-4 border-b">Phân loại</th>
-              <th className="p-4 border-b">Cách tính</th>
-              <th className="p-4 border-b">Đơn giá / Cấu hình</th>
-              <th className="p-4 border-b">Trạng thái</th>
-              <th className="p-4 border-b text-right">Hành động</th>
+              <th className="p-3 text-left">Tên Cấu Hình</th>
+              <th className="p-3 text-left">Loại Phí</th>
+              <th className="p-3 text-left">Cách Tính</th>
+              <th className="p-3 text-left">Giá Trị</th>
+              <th className="p-3 text-right">Hành động</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-gray-100">
-            {fees.length === 0 ? (
-                <tr><td colSpan="6" className="p-8 text-center text-gray-500 italic">Chưa có loại phí nào được tạo.</td></tr>
-            ) : fees.map(fee => (
-              <tr key={fee.id} className="hover:bg-blue-50 transition-colors">
-                <td className="p-4 font-semibold text-gray-800">{fee.name}</td>
-                <td className="p-4 text-xs text-gray-500"><Tag size={12} className="inline mr-1"/>{fee.category}</td>
-                <td className="p-4">
-                  {renderTypeBadge(fee.calc_method)}
+          <tbody>
+            {fees.map(fee => (
+              <tr key={fee.id} className="border-b">
+                <td className="p-3 font-medium">{fee.name}</td>
+                <td className="p-3">{fee.FeeType?.name} ({fee.FeeType?.unit})</td>
+                <td className="p-3">
+                  <span className={`px-2 py-1 rounded text-xs ${fee.calc_method === 'TIERED' ? 'bg-purple-100 text-purple-800' : 'bg-green-100 text-green-800'}`}>
+                    {fee.calc_method === 'TIERED' ? 'Bậc thang' : 'Cố định'}
+                  </span>
                 </td>
-                <td className="p-4 text-gray-800">
-                  {fee.calc_method === 'TIERED' ? (
-                     <div className="text-sm">
-                        <div className="font-bold text-purple-700">
-                          {fee.tier_config?.length || 0} bậc giá
-                        </div>
-                     </div>
-                  ) : (
-                     <div className="font-bold">
-                        {new Intl.NumberFormat('vi-VN').format(fee.price)} đ 
-                        <span className="text-xs font-normal text-gray-500 ml-1">/ {fee.unit}</span>
-                     </div>
-                  )}
+                <td className="p-3">
+                  {fee.calc_method === 'FIXED' 
+                    ? `${parseInt(fee.unit_price).toLocaleString()} đ` 
+                    : `${fee.tier_config?.length || 0} bậc giá`}
                 </td>
-                <td className="p-4">
-                  {fee.active ? <span className="text-green-600 text-xs font-bold flex items-center gap-1"><CheckCircle size={14} /> Active</span> : <span className="text-gray-400 text-xs font-bold flex items-center gap-1"><XCircle size={14} /> Inactive</span>}
-                </td>
-                <td className="p-4 text-right">
-                  <button onClick={() => handleStartEdit(fee)} className="text-blue-500 hover:bg-blue-100 p-2 rounded-full mx-1"><Edit size={18} /></button>
-                  <button onClick={() => handleDelete(fee.id)} className="text-red-500 hover:bg-red-100 p-2 rounded-full mx-1"><Trash2 size={18} /></button>
+                <td className="p-3 text-right space-x-2">
+                  <button onClick={() => openEdit(fee)} className="text-blue-600 hover:text-blue-800"><Edit size={18} /></button>
+                  <button onClick={async () => { if(confirm('Xóa?')) { await deleteFee(fee.id); loadData(); } }} className="text-red-600 hover:text-red-800"><Trash2 size={18} /></button>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+
+      {/* MODAL FORM */}
+      {isModalOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-lg w-full max-w-2xl p-6">
+            <h2 className="text-xl font-bold mb-4">{editingFee ? 'Sửa Cấu Hình' : 'Thêm Mới'}</h2>
+            <form onSubmit={handleSubmit}>
+              <div className="grid grid-cols-2 gap-4 mb-4">
+                <div>
+                  <label className="block text-sm font-medium mb-1">Tên cấu hình</label>
+                  <input required name="name" value={formData.name} onChange={handleChange} className="w-full border p-2 rounded" placeholder="VD: Giá điện 2024" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-1">Loại phí gốc</label>
+                  <select required name="fee_type_id" value={formData.fee_type_id} onChange={handleChange} className="w-full border p-2 rounded">
+                    <option value="">-- Chọn loại phí --</option>
+                    {feeTypes.map(type => (
+                      <option key={type.id} value={type.id}>{type.name} ({type.unit})</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="mb-4">
+                <label className="block text-sm font-medium mb-1">Phương pháp tính</label>
+                <select name="calc_method" value={formData.calc_method} onChange={handleChange} className="w-full border p-2 rounded">
+                  <option value="FIXED">Giá Cố định (Flat)</option>
+                  <option value="TIERED">Bậc thang (Lũy tiến)</option>
+                </select>
+              </div>
+
+              {/* LOGIC NHẬP GIÁ */}
+              {formData.calc_method === 'FIXED' ? (
+                <div className="mb-4">
+                  <label className="block text-sm font-medium mb-1">Đơn giá (VNĐ)</label>
+                  <input type="number" name="unit_price" value={formData.unit_price} onChange={handleChange} className="w-full border p-2 rounded" />
+                </div>
+              ) : (
+                <div className="mb-4 border p-3 rounded bg-gray-50">
+                  <div className="flex justify-between items-center mb-2">
+                    <label className="font-medium text-sm">Cấu hình Bậc thang</label>
+                    <button type="button" onClick={addTier} className="text-blue-600 text-xs flex items-center gap-1">+ Thêm bậc</button>
+                  </div>
+                  {formData.tier_config.map((tier, index) => (
+                    <div key={index} className="flex gap-2 mb-2 items-center">
+                      <input type="number" placeholder="Từ số" value={tier.from} onChange={(e) => handleTierChange(index, 'from', e.target.value)} className="w-20 border p-1 rounded text-sm" />
+                      <span>-</span>
+                      <input type="number" placeholder="Đến (bỏ trống = vô cùng)" value={tier.to} onChange={(e) => handleTierChange(index, 'to', e.target.value)} className="w-40 border p-1 rounded text-sm" />
+                      <input type="number" placeholder="Giá tiền" value={tier.price} onChange={(e) => handleTierChange(index, 'price', e.target.value)} className="flex-1 border p-1 rounded text-sm" />
+                      <button type="button" onClick={() => removeTier(index)} className="text-red-500"><X size={16} /></button>
+                    </div>
+                  ))}
+                  <p className="text-xs text-gray-500 italic">* Để trống ô "Đến" ở bậc cuối cùng để tính cho tất cả số còn lại.</p>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 mt-6">
+                <button type="button" onClick={() => setIsModalOpen(false)} className="px-4 py-2 text-gray-600">Hủy</button>
+                <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded">Lưu cấu hình</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
-}
+};
+
+export default FeeManager;

@@ -1,21 +1,75 @@
-import React, { useState } from 'react';
-import { Building, Lock, Save, MapPin, Phone, CreditCard, Shield } from 'lucide-react';
-import api from '../api';
+import React, { useState, useEffect } from 'react';
+import { Building, Lock, Save, MapPin, Phone, CreditCard, Shield, Landmark } from 'lucide-react';
+import api, { getPaymentConfig, updatePaymentConfig } from '../api';
 
 export default function BuildingInfo() {
-  const [activeTab, setActiveTab] = useState('info'); // 'info' hoặc 'security'
+  const [activeTab, setActiveTab] = useState('info'); // 'info', 'payment', 'security'
   
-  // Lấy user từ localStorage để biết ai đang đổi pass
-  const user = JSON.parse(atob(localStorage.getItem('token').split('.')[1])); // Decode JWT thô sơ để lấy username (hoặc lấy từ state User trong App)
+  // Lấy user từ localStorage
+  const token = localStorage.getItem('token');
+  const user = token ? JSON.parse(atob(token.split('.')[1])) : { username: 'admin' };
 
-  // State đổi mật khẩu
+  // --- STATE 1: ĐỔI MẬT KHẨU ---
   const [passForm, setPassForm] = useState({
     oldPassword: '',
     newPassword: '',
     confirmPassword: ''
   });
+
+  // --- STATE 2: CẤU HÌNH THANH TOÁN ---
+  const [paymentForm, setPaymentForm] = useState({
+    bank_id: '',
+    account_no: '',
+    account_name: '',
+    template: '3AoGQeA'
+  });
+
   const [loading, setLoading] = useState(false);
 
+  // Danh sách ngân hàng (để gợi ý)
+  const banks = [
+    { code: 'MB', name: 'MB Bank' },
+    { code: 'VCB', name: 'Vietcombank' },
+    { code: 'TCB', name: 'Techcombank' },
+    { code: 'ACB', name: 'ACB' },
+    { code: 'BIDV', name: 'BIDV' },
+    { code: 'ICB', name: 'VietinBank' },
+    { code: 'TPB', name: 'TPBank' },
+  ];
+
+  // Load cấu hình thanh toán khi vào trang
+  useEffect(() => {
+    loadPaymentConfig();
+  }, []);
+
+  const loadPaymentConfig = async () => {
+    try {
+        const res = await getPaymentConfig(); // Gọi API lấy thông tin
+        if (res.data && res.data.bank_id) {
+            setPaymentForm(res.data);
+        }
+    } catch (err) {
+        console.error("Lỗi tải cấu hình thanh toán:", err);
+    }
+  };
+
+  // Xử lý lưu cấu hình thanh toán
+  const handleSavePayment = async (e) => {
+      e.preventDefault();
+      setLoading(true);
+      try {
+          await updatePaymentConfig(paymentForm);
+          alert("Cập nhật thông tin thanh toán thành công!");
+          // Load lại để cập nhật view
+          loadPaymentConfig(); 
+      } catch (err) {
+          alert("Lỗi: " + (err.response?.data?.message || err.message));
+      } finally {
+          setLoading(false);
+      }
+  };
+
+  // Xử lý đổi mật khẩu
   const handleChangePass = async (e) => {
     e.preventDefault();
     if (passForm.newPassword !== passForm.confirmPassword) {
@@ -25,7 +79,7 @@ export default function BuildingInfo() {
     setLoading(true);
     try {
         await api.post('/auth/change-password', {
-            username: user.username, // Gửi username lấy từ token
+            username: user.username,
             oldPassword: passForm.oldPassword,
             newPassword: passForm.newPassword
         });
@@ -39,35 +93,41 @@ export default function BuildingInfo() {
   };
 
   return (
-    <div className="p-6 max-w-4xl mx-auto">
+    <div className="p-6 max-w-5xl mx-auto">
       <h1 className="text-2xl font-bold text-gray-800 mb-6 flex items-center gap-2">
         <Building className="text-blue-600"/> Cấu hình hệ thống
       </h1>
 
       {/* TABS HEADER */}
-      <div className="flex border-b border-gray-200 mb-6">
+      <div className="flex border-b border-gray-200 mb-6 overflow-x-auto">
         <button 
-            className={`py-3 px-6 font-medium text-sm transition-colors border-b-2 ${activeTab === 'info' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            className={`py-3 px-6 font-medium text-sm transition-colors border-b-2 whitespace-nowrap ${activeTab === 'info' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
             onClick={() => setActiveTab('info')}
         >
-            Thông tin Tòa nhà
+            Thông tin chung
         </button>
         <button 
-            className={`py-3 px-6 font-medium text-sm transition-colors border-b-2 ${activeTab === 'security' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            className={`py-3 px-6 font-medium text-sm transition-colors border-b-2 whitespace-nowrap ${activeTab === 'payment' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            onClick={() => setActiveTab('payment')}
+        >
+            Cấu hình Thanh toán
+        </button>
+        <button 
+            className={`py-3 px-6 font-medium text-sm transition-colors border-b-2 whitespace-nowrap ${activeTab === 'security' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
             onClick={() => setActiveTab('security')}
         >
-            Đổi mật khẩu & Bảo mật
+            Bảo mật & Tài khoản
         </button>
       </div>
 
       {/* TAB CONTENT */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 min-h-[400px]">
         
-        {/* --- TAB 1: THÔNG TIN TÒA NHÀ (STATIC) --- */}
+        {/* --- TAB 1: THÔNG TIN CHUNG --- */}
         {activeTab === 'info' && (
             <div className="animate-in fade-in duration-300">
                 <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-                    <MapPin size={20} className="text-orange-500"/> Thông tin chung
+                    <MapPin size={20} className="text-orange-500"/> Thông tin dự án
                 </h3>
                 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
@@ -92,26 +152,112 @@ export default function BuildingInfo() {
                 </div>
 
                 <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-                    <CreditCard size={20} className="text-green-600"/> Tài khoản nhận thanh toán
+                    <CreditCard size={20} className="text-green-600"/> Tài khoản nhận thanh toán hiện tại
                 </h3>
-                <div className="bg-blue-50 border border-blue-100 p-5 rounded-xl flex items-center gap-4">
-                    <div className="bg-white p-2 rounded shadow-sm">
-                        <img src="https://img.vietqr.io/image/MB-0000123456789-compact2.png" className="w-24 h-24 object-contain" alt="QR Demo"/>
+                
+                {/* Hiển thị thông tin thanh toán ĐỘNG (Lấy từ API) */}
+                {paymentForm.bank_id ? (
+                    <div className="bg-blue-50 border border-blue-100 p-5 rounded-xl flex items-center gap-4">
+                        <div className="bg-white p-2 rounded shadow-sm">
+                            <img 
+                                src={`https://img.vietqr.io/image/${paymentForm.bank_id}-${paymentForm.account_no}-3AoGQeA.png?amount=1000&accountName=${encodeURIComponent(paymentForm.account_name)}`} 
+                                className="w-24 h-24 object-contain" 
+                                alt="QR Demo"
+                            />
+                        </div>
+                        <div>
+                            <p className="text-sm text-gray-500">Ngân hàng: <b className="text-gray-800">{paymentForm.bank_id}</b></p>
+                            <p className="text-sm text-gray-500">Số tài khoản: <b className="text-blue-700 text-lg">{paymentForm.account_no}</b></p>
+                            <p className="text-sm text-gray-500">Chủ tài khoản: <b className="text-gray-800">{paymentForm.account_name}</b></p>
+                        </div>
                     </div>
-                    <div>
-                        <p className="text-sm text-gray-500">Ngân hàng: <b className="text-gray-800">MB Bank</b></p>
-                        <p className="text-sm text-gray-500">Số tài khoản: <b className="text-blue-700 text-lg">0000 1234 56789</b></p>
-                        <p className="text-sm text-gray-500">Chủ tài khoản: <b className="text-gray-800">BAN QUAN TRI CHUNG CU</b></p>
+                ) : (
+                    <div className="text-gray-500 italic p-4 bg-gray-50 rounded">Chưa cấu hình tài khoản nhận tiền.</div>
+                )}
+            </div>
+        )}
+
+        {/* --- TAB 2: CẤU HÌNH THANH TOÁN (MỚI) --- */}
+        {activeTab === 'payment' && (
+            <div className="max-w-3xl animate-in fade-in duration-300">
+                <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+                    <Landmark size={20} className="text-blue-600"/> Cài đặt Tài khoản Ngân hàng
+                </h3>
+                <p className="text-sm text-gray-500 mb-6">Thông tin này sẽ được sử dụng để tạo mã QR tự động cho cư dân thanh toán.</p>
+
+                <div className="flex flex-col md:flex-row gap-8">
+                    {/* FORM */}
+                    <form onSubmit={handleSavePayment} className="flex-1 space-y-4">
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-1">Ngân hàng</label>
+                            <select 
+                                className="w-full border p-2.5 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-gray-50"
+                                value={paymentForm.bank_id}
+                                onChange={e => setPaymentForm({...paymentForm, bank_id: e.target.value})}
+                                required
+                            >
+                                <option value="">-- Chọn ngân hàng --</option>
+                                {banks.map(b => (
+                                    <option key={b.code} value={b.code}>{b.code} - {b.name}</option>
+                                ))}
+                            </select>
+                        </div>
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-1">Số tài khoản</label>
+                            <input 
+                                type="text" required
+                                className="w-full border p-2.5 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                                value={paymentForm.account_no}
+                                onChange={e => setPaymentForm({...paymentForm, account_no: e.target.value})}
+                                placeholder="VD: 0333..."
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-1">Tên chủ tài khoản (Không dấu)</label>
+                            <input 
+                                type="text" required
+                                className="w-full border p-2.5 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none uppercase"
+                                value={paymentForm.account_name}
+                                onChange={e => setPaymentForm({...paymentForm, account_name: e.target.value.toUpperCase()})}
+                                placeholder="NGUYEN VAN A"
+                            />
+                        </div>
+
+                        <button 
+                            type="submit"
+                            disabled={loading}
+                            className="bg-blue-600 text-white px-6 py-2.5 rounded-lg font-bold hover:bg-blue-700 flex items-center gap-2 shadow-lg transition disabled:opacity-70 mt-4"
+                        >
+                            {loading ? 'Đang lưu...' : <><Save size={18}/> Lưu Cấu Hình</>}
+                        </button>
+                    </form>
+
+                    {/* PREVIEW */}
+                    <div className="w-full md:w-64">
+                         <div className="bg-gray-50 p-4 rounded-lg border text-center">
+                            <span className="text-xs font-bold text-gray-400 uppercase mb-2 block">Xem trước QR</span>
+                            {paymentForm.bank_id && paymentForm.account_no ? (
+                                <img 
+                                    src={`https://img.vietqr.io/image/${paymentForm.bank_id}-${paymentForm.account_no}-3AoGQeA.png?amount=1000&accountName=${encodeURIComponent(paymentForm.account_name)}`} 
+                                    alt="QR Preview" 
+                                    className="w-full h-auto rounded border shadow-sm"
+                                />
+                            ) : (
+                                <div className="h-48 flex items-center justify-center text-gray-400 text-sm border-2 border-dashed rounded">
+                                    Nhập thông tin để xem trước
+                                </div>
+                            )}
+                         </div>
                     </div>
                 </div>
             </div>
         )}
 
-        {/* --- TAB 2: ĐỔI MẬT KHẨU --- */}
+        {/* --- TAB 3: ĐỔI MẬT KHẨU --- */}
         {activeTab === 'security' && (
             <div className="max-w-md animate-in fade-in duration-300">
                 <h3 className="text-lg font-bold text-gray-800 mb-1 flex items-center gap-2">
-                    <Shield size={20} className="text-blue-600"/> Thay đổi mật khẩu
+                    <Shield size={20} className="text-red-600"/> Thay đổi mật khẩu
                 </h3>
                 <p className="text-gray-500 text-sm mb-6">Cập nhật mật khẩu định kỳ để bảo vệ tài khoản quản trị.</p>
 
@@ -160,9 +306,9 @@ export default function BuildingInfo() {
                     <button 
                         type="submit"
                         disabled={loading}
-                        className="mt-4 bg-blue-600 text-white px-6 py-2.5 rounded-lg font-bold hover:bg-blue-700 flex items-center gap-2 shadow-lg transition disabled:opacity-70"
+                        className="mt-4 bg-red-600 text-white px-6 py-2.5 rounded-lg font-bold hover:bg-red-700 flex items-center gap-2 shadow-lg transition disabled:opacity-70"
                     >
-                        {loading ? 'Đang xử lý...' : <><Save size={18}/> Lưu thay đổi</>}
+                        {loading ? 'Đang xử lý...' : <><Save size={18}/> Đổi mật khẩu</>}
                     </button>
                 </form>
             </div>

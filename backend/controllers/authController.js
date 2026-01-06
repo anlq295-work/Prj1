@@ -25,7 +25,7 @@ exports.login = async (req, res) => {
         }
 
         // 4. Lấy thông tin Profile (nếu có) để hiển thị tên đẹp
-        const profile = await UserProfile.findOne({ where: { userId: user.id } });
+        const profile = await UserProfile.findOne({ where: { user_id: user.id } });
         const displayName = profile ? profile.fullName : user.username;
         const avatarUrl = profile ? profile.avatarUrl : `https://ui-avatars.com/api/?name=${displayName}&background=random`;
 

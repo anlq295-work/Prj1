@@ -1,66 +1,100 @@
 /**
- * HÀM TÍNH TIỀN BẬC THANG (Logic cốt lõi)
- * Input: 
- * - usage: Số lượng tiêu thụ (VD: 120 kWh)
- * - tierConfig: Array JSON cấu hình ([{from: 0, to: 50, price: 1678}, ...])
+ * Tính tiền theo bậc thang (Lũy tiến)
+ * @param {number} totalUsage - Tổng số lượng tiêu thụ (VD: 120 kWh)
+ * @param {Array} tierConfig - Cấu hình bậc [{from, to, price}, ...]
  */
-const calculateTieredFee = (usage, tierConfig) => {
-  // 1. Kiểm tra đầu vào an toàn
-  if (!tierConfig || !Array.isArray(tierConfig) || usage <= 0) {
-    return { total: 0, breakdown: [] };
-  }
-
-  // 2. Sắp xếp bậc thang để đảm bảo tính đúng thứ tự (từ thấp đến cao)
-  const sortedTiers = tierConfig.sort((a, b) => a.from - b.from);
-
-  let totalAmount = 0;
-  let remainingUsage = usage;
-  let breakdown = []; // Mảng lưu chi tiết từng bậc để in hóa đơn
-
-  for (let i = 0; i < sortedTiers.length; i++) {
-    const tier = sortedTiers[i];
-    
-    // Nếu đã tính hết số lượng dùng thì dừng
-    if (remainingUsage <= 0) break;
-
-    // Tính độ rộng của bậc này
-    let availableInTier;
-    
-    // Nếu "to" là null hoặc 0 -> Coi như là bậc cuối (vô cùng)
-    if (!tier.to) {
-      availableInTier = remainingUsage;
-    } else {
-      // Logic: (Đến số - Từ số + 1). VD: 0->50 là 51 số.
-      // Nếu muốn chính xác theo kiểu điện lực (0-50 là 50 số), bạn có thể chỉnh lại công thức ở đây.
-      // Với config hiện tại: 0-50, 51-100... thì dùng công thức dưới là an toàn:
-      availableInTier = tier.to - tier.from + 1;
-      
-      // Fix edge case nếu bậc đầu tiên bắt đầu từ 0
-      if (tier.from === 0) availableInTier = tier.to; 
+const calculateTieredFee = (totalUsage, tierConfig) => {
+    // 1. Validate đầu vào
+    if (!tierConfig || !Array.isArray(tierConfig) || tierConfig.length === 0) {
+        return { total: 0, breakdown: [] };
     }
 
-    // Số lượng thực tế tính tiền ở bậc này = Min(Số còn lại, Độ rộng bậc)
-    const usageInTier = Math.min(remainingUsage, availableInTier);
+    // 2. Sắp xếp bậc thang từ thấp đến cao
+    const sortedTiers = tierConfig.sort((a, b) => a.from - b.from);
 
-    // Tính tiền
-    const cost = usageInTier * tier.price;
-    totalAmount += cost;
+    let remainingUsage = Number(totalUsage);
+    let totalCost = 0;
+    let breakdown = [];
 
-    // Lưu chi tiết (Snapshost)
-    breakdown.push({
-      tierIndex: i + 1,
-      from: tier.from,
-      to: tier.to || 'Trở lên',
-      price: tier.price,
-      usage: usageInTier,
-      cost: cost
-    });
+    // 3. Duyệt qua từng bậc
+    for (let i = 0; i < sortedTiers.length; i++) {
+        if (remainingUsage <= 0) break;
 
-    // Trừ đi số lượng đã tính
-    remainingUsage -= usageInTier;
-  }
+        const tier = sortedTiers[i];
+        
+        // Tính định mức của bậc này (amount in tier)
+        // Nếu có 'to', limit = to - from + 1 (hoặc theo logic to - from tùy quy ước).
+        // Logic chuẩn thường dùng: 
+        // Bậc 1: 0 - 50 -> Limit = 50
+        // Bậc 2: 51 - 100 -> Limit = 50
+        // => Logic: Limit = tier.to - tier.from + 1 (nếu tính cả mốc), hoặc tier.to (nếu bậc 1)
+        
+        let tierLimit = Infinity;
+        
+        if (tier.to && tier.to > 0) {
+            // Cách tính limit an toàn:
+            if (i === 0) {
+                // Bậc đầu tiên: Limit chính là số 'to' (VD: 0-50 -> 50 số)
+                tierLimit = tier.to; 
+            } else {
+                // Các bậc sau: to - from + 1. (VD: 51-100 -> 50 số)
+                // Tuy nhiên, thường input lưu: from 50, to 100.
+                tierLimit = tier.to - tier.from; 
+                // Có thể cần +1 tùy vào cách bạn nhập dữ liệu (0-49 hay 0-50).
+                // Ở đây giả sử input chuẩn mốc (0-50, 50-100).
+            }
+        }
 
-  return { total: totalAmount, breakdown };
+        // Số lượng tính cho bậc này = Min(Phần còn lại, Định mức bậc)
+        const usageInTier = Math.min(remainingUsage, tierLimit);
+        
+        const tierCost = usageInTier * Number(tier.price);
+
+        breakdown.push({
+            tierIndex: i + 1,
+            from: tier.from,
+            to: tier.to,
+            price: Number(tier.price),
+            usage: usageInTier,
+            cost: tierCost
+        });
+
+        totalCost += tierCost;
+        remainingUsage -= usageInTier;
+    }
+
+    // 4. Xử lý phần dư (nếu dùng vượt quá cấu hình bậc -> tính theo giá bậc cuối)
+    if (remainingUsage > 0 && sortedTiers.length > 0) {
+        const lastTier = sortedTiers[sortedTiers.length - 1];
+        const extraCost = remainingUsage * Number(lastTier.price);
+        
+        // Cập nhật vào dòng cuối cùng của breakdown
+        if (breakdown.length > 0) {
+            const lastBreakdown = breakdown[breakdown.length - 1];
+            lastBreakdown.usage += remainingUsage;
+            lastBreakdown.cost += extraCost;
+            // Nếu bậc cuối là vô cùng thì xóa 'to' để hiển thị đúng
+            lastBreakdown.to = null; 
+        } else {
+             // Trường hợp hy hữu (chưa vào vòng lặp nào)
+             breakdown.push({
+                tierIndex: sortedTiers.length,
+                from: lastTier.from,
+                to: null,
+                price: Number(lastTier.price),
+                usage: remainingUsage,
+                cost: extraCost
+            });
+        }
+        
+        totalCost += extraCost;
+    }
+
+    return {
+        total: totalCost,
+        breakdown: breakdown
+    };
 };
 
+// Xuất module đúng chuẩn
 module.exports = { calculateTieredFee };

@@ -2,14 +2,13 @@ import axios from 'axios';
 
 // 1. Tạo instance Axios
 const api = axios.create({
-  baseURL: 'http://localhost:5000/api', // Đảm bảo Backend chạy port 5000
+  baseURL: 'http://localhost:5000/api', // Đảm bảo đúng port Backend
   headers: {
     'Content-Type': 'application/json',
   },
 });
 
-// 2. Cấu hình Interceptor (Quan trọng)
-// Tự động lấy Token từ LocalStorage và gắn vào Header mỗi khi gọi API
+// 2. Interceptor: Tự động gắn Token vào Header
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('token');
@@ -18,61 +17,48 @@ api.interceptors.request.use(
     }
     return config;
   },
-  (error) => {
-    return Promise.reject(error);
-  }
+  (error) => Promise.reject(error)
 );
 
-// 3. Xử lý lỗi toàn cục (Optional)
-// Nếu Token hết hạn (Lỗi 401), tự động đăng xuất
+// 3. Xử lý lỗi (Token hết hạn -> Auto logout)
 api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response && error.response.status === 401) {
-      // Token hết hạn hoặc không hợp lệ -> Xóa token và reload trang (hoặc redirect login)
       localStorage.removeItem('token');
-      // window.location.href = '/login'; // Bỏ comment dòng này nếu muốn tự động đá về trang login
+      window.location.href = '/login'; 
     }
     return Promise.reject(error);
   }
 );
 
-// --- API AUTH (XÁC THỰC) ---
+// --- AUTH API ---
 export const loginUser = async (username, password) => {
-    // Gọi API login thực tế của Backend
-    const response = await api.post('/auth/login', { username, password });
-    return response.data; // Trả về { message, token, user }
+    const res = await api.post('/auth/login', { username, password });
+    return res.data;
 };
 
-// --- API PHÍ (FEES) ---
+// --- FEE API (Quản lý Phí) ---
 export const getFees = () => api.get('/fees');
+export const getFeeTypes = () => api.get('/fees/types'); // [MỚI] Lấy danh sách loại phí
 export const createFee = (data) => api.post('/fees', data);
 export const updateFee = (id, data) => api.put(`/fees/${id}`, data);
 export const deleteFee = (id) => api.delete(`/fees/${id}`);
 
-// --- API HÓA ĐƠN (INVOICES) ---
-// Lưu ý: Backend dùng route /invoices, hãy đảm bảo server.js map đúng route
-export const generateInvoices = (month, year) => api.post('/invoices/generate', { month, year });
-
-// Tìm kiếm hóa đơn
-export const searchInvoices = (params) => api.get('/invoices/search', { params }); 
-
-// Phát hành hóa đơn (Draft -> Pending)
-export const publishInvoices = (month, year) => api.post('/invoices/publish', { month, year });
-
-// Thanh toán hóa đơn
-export const payInvoice = (id, method) => api.post(`/invoices/${id}/pay`, { method });
-
-// [MỚI] Thêm phí lẻ/phát sinh thủ công (Ad-hoc)
-export const addAdHocFee = (data) => api.post('/invoices/add-item', data);
-
-// --- API CĂN HỘ / CƯ DÂN (Dùng cho dropdown) ---
-// Nếu bạn cần lấy danh sách căn hộ để dropdown chọn
-export const getApartments = () => api.get('/apartments');
-
+// --- USAGE API (Chỉ số Điện/Nước) ---
 export const getUsages = (month, year) => api.get('/usage', { params: { month, year } });
 export const saveUsages = (data) => api.post('/usage', data);
 
-export const changePassword = (data) => api.post('/auth/change-password', data);
+// --- INVOICE API (Biên lai) ---
+export const generateInvoices = (month, year) => api.post('/invoices/generate', { month, year });
+export const searchInvoices = (params) => api.get('/invoices/search', { params });
+export const publishInvoices = (month, year) => api.post('/invoices/publish', { month, year });
+export const addAdHocFee = (data) => api.post('/invoices/add-item', data); 
+export const updateInvoice = (id, data) => api.put(`/invoices/${id}`, data);
+export const payInvoice = (id, data) => api.post(`/invoices/${id}/pay`, data);
+export const publicPayInvoice = (id, data) => api.post(`/invoices/public/pay/${id}`, data);
+export const getPaymentConfig = () => api.get('/payment-config');
+export const updatePaymentConfig = (data) => api.post('/payment-config', data);
+export const deleteInvoice = (id) => api.delete(`/invoices/${id}`);
 
 export default api;

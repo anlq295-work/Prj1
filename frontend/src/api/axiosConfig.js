@@ -12,7 +12,7 @@ export const getFees = () => api.get('/fees');
 export const createFee = (data) => api.post('/fees', data);
 export const toggleFee = (id) => api.put(`/fees/${id}/toggle`);
 
-// --- API HÓA ĐƠN (INVOICES) ---
+// --- API BIÊN LAI (INVOICES) ---
 export const generateInvoices = (month, year) => api.post('/invoices/generate', { month, year });
 export const searchInvoices = (params) => api.get('/invoices/search', { params });
 export const publishInvoices = (month, year) => api.post('/invoices/publish', { month, year });

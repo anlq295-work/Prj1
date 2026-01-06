@@ -1,13 +1,13 @@
 const sequelize = require('../config/database');
 const { DataTypes } = require('sequelize');
 
-// 1. Import Models
+// 1. Import Models (SỬA LẠI: Bỏ gọi hàm)
 const Apartment = require('./Apartment');
 const Household = require('./Household');
-const FeeType = require('./FeeType');
+const FeeType = require('./FeeType'); // Đã sửa theo mẫu bạn gửi
 const FeeConfig = require('./FeeConfig');
 const BillingPeriod = require('./BillingPeriod');
-const MeterReading = require('./MeterReading'); // Đổi từ Usage -> MeterReading
+const MeterReading = require('./MeterReading'); // Đảm bảo file này cũng viết đúng chuẩn
 const Invoice = require('./Invoice');
 const InvoiceItem = require('./InvoiceItem');
 const Payment = require('./Payment');
@@ -24,38 +24,32 @@ UserProfile.belongsTo(User, { foreignKey: 'user_id' });
 Apartment.hasMany(Household, { foreignKey: 'apartment_id' });
 Household.belongsTo(Apartment, { foreignKey: 'apartment_id' });
 
-// --- Phí (Config & Type) ---
+// --- Phí ---
 FeeType.hasMany(FeeConfig, { foreignKey: 'fee_type_id' });
 FeeConfig.belongsTo(FeeType, { foreignKey: 'fee_type_id' });
 
 // --- Chỉ số (MeterReading) ---
-// Liên kết với Căn hộ
 Apartment.hasMany(MeterReading, { foreignKey: 'apartment_id' });
 MeterReading.belongsTo(Apartment, { foreignKey: 'apartment_id' });
 
-// Liên kết với Kỳ thu
 BillingPeriod.hasMany(MeterReading, { foreignKey: 'billing_period_id' });
 MeterReading.belongsTo(BillingPeriod, { foreignKey: 'billing_period_id' });
 
-// Liên kết với Loại phí
 FeeType.hasMany(MeterReading, { foreignKey: 'fee_type_id' });
 MeterReading.belongsTo(FeeType, { foreignKey: 'fee_type_id' });
 
-// --- Hóa đơn (Invoice) ---
-// Liên kết Hộ dân
+// --- Biên lai (Invoice) ---
 Household.hasMany(Invoice, { foreignKey: 'household_id' });
 Invoice.belongsTo(Household, { foreignKey: 'household_id' });
 
-// Liên kết Căn hộ (Để query nhanh)
 Apartment.hasMany(Invoice, { foreignKey: 'apartment_id' });
 Invoice.belongsTo(Apartment, { foreignKey: 'apartment_id' });
 
-// Liên kết Kỳ thu
 BillingPeriod.hasMany(Invoice, { foreignKey: 'billing_period_id' });
 Invoice.belongsTo(BillingPeriod, { foreignKey: 'billing_period_id' });
 
-// --- Chi tiết Hóa đơn (Items) ---
-Invoice.hasMany(InvoiceItem, { foreignKey: 'invoice_id', onDelete: 'CASCADE' });
+// --- Chi tiết Biên lai ---
+Invoice.hasMany(InvoiceItem, { foreignKey: 'invoice_id', as: 'InvoiceItems', onDelete: 'CASCADE' });
 InvoiceItem.belongsTo(Invoice, { foreignKey: 'invoice_id' });
 
 FeeType.hasMany(InvoiceItem, { foreignKey: 'fee_type_id' });
@@ -73,7 +67,7 @@ module.exports = {
   FeeType,
   FeeConfig,
   BillingPeriod,
-  MeterReading, // Export tên mới
+  MeterReading,
   Invoice,
   InvoiceItem,
   Payment,
@@ -84,7 +78,6 @@ module.exports = {
     try {
       await sequelize.authenticate();
       console.log('✅ Kết nối CSDL thành công.');
-      // await sequelize.sync({ alter: true }); // Bật khi cần sửa cấu trúc tự động (thận trọng)
     } catch (error) {
       console.error('❌ Kết nối thất bại:', error);
     }

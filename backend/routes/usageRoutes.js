@@ -6,6 +6,6 @@ const usageController = require('../controllers/usageController');
 router.get('/', usageController.getUsages);
 
 // API lưu chỉ số (bulk update)
-router.post('/', usageController.saveUsages);
+router.post('/', usageController.saveUsage);
 
 module.exports = router;

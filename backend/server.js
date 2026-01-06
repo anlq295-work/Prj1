@@ -12,12 +12,14 @@ const invoiceRoutes = require('./routes/invoiceRoutes');
 const authRoutes = require('./routes/authRoutes');
 const apartmentRoutes = require('./routes/apartmentRoutes');
 const usageRoutes = require('./routes/usageRoutes');
+const paymentRoutes = require('./routes/paymentRoutes');
 
 app.use('/api/fees', feeRoutes);
 app.use('/api/invoices', invoiceRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/apartments', apartmentRoutes);
 app.use('/api/usage', usageRoutes);
+app.use('/api/payment-config', paymentRoutes);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, async () => {
