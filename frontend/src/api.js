@@ -50,7 +50,7 @@ export const getUsages = (month, year) => api.get('/usage', { params: { month, y
 export const saveUsages = (data) => api.post('/usage', data);
 
 // --- INVOICE API (Biên lai) ---
-export const generateInvoices = (month, year) => api.post('/invoices/generate', { month, year });
+export const generateInvoices = (data) => api.post('/invoices/generate', data);
 export const searchInvoices = (params) => api.get('/invoices/search', { params });
 export const publishInvoices = (month, year) => api.post('/invoices/publish', { month, year });
 export const addAdHocFee = (data) => api.post('/invoices/add-item', data); 
