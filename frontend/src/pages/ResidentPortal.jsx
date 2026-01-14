@@ -1,20 +1,20 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import api from '../api';
-import { Search, CheckCircle, AlertCircle, FileText, Zap, CreditCard, Calendar } from 'lucide-react';
-import RoomBillDetail from '../components/RoomBillDetail';
-import PaymentModal from '../components/PaymentModal';
+import { Search, CheckCircle, AlertCircle, Zap, CreditCard, Calendar, Phone, Wallet, History, ArrowRight } from 'lucide-react';
+import RoomBillDetail from '../components/RoomBillDetail'; // Đảm bảo đường dẫn đúng
+import PaymentModal from '../components/PaymentModal';     // Đảm bảo đường dẫn đúng
 
 const ResidentPortal = () => {
-    const [code, setCode] = useState('');
+    const [phone, setPhone] = useState('');
     const [bills, setBills] = useState(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
-    
-    // State cho các Modal
-    const [selectedInvoice, setSelectedInvoice] = useState(null); // Modal xem chi tiết
-    const [paymentInvoice, setPaymentInvoice] = useState(null);   // Modal thanh toán thủ công
+    const [filterStatus, setFilterStatus] = useState('ALL'); 
 
-    // --- [QUAN TRỌNG] HÀM FORMAT NGÀY AN TOÀN ---
+    // State quản lý hiển thị Modal
+    const [selectedInvoice, setSelectedInvoice] = useState(null); 
+    const [paymentInvoice, setPaymentInvoice] = useState(null);   
+
     const formatDate = (dateString) => {
         if (!dateString) return '---';
         const date = new Date(dateString);
@@ -26,176 +26,259 @@ const ResidentPortal = () => {
 
     const handleSearch = async (e) => {
         e?.preventDefault();
-        if (!code.trim()) return;
+        const cleanPhone = phone.trim();
+        if (!cleanPhone || !/^[0-9]{9,11}$/.test(cleanPhone)) {
+            setError("Vui lòng nhập số điện thoại hợp lệ.");
+            return;
+        }
 
         setLoading(true);
         setError('');
-        setBills(null);
+        // Không setBills(null) ngay để tránh nhấp nháy nếu đang refresh
+        if(!bills) setBills(null); 
+        setFilterStatus('ALL');
 
         try {
-            const res = await api.get(`/invoices/public/search?code=${code.trim()}`);
+            const res = await api.get(`/invoices/public/search?phone=${cleanPhone}`);
             setBills(res.data);
         } catch (err) {
-            setError(err.response?.data?.message || "Lỗi khi tra cứu. Vui lòng kiểm tra lại mã căn hộ.");
+            setError(err.response?.data?.message || "Không tìm thấy dữ liệu.");
             setBills([]);
         } finally {
             setLoading(false);
         }
     };
 
-    // --- 2. HÀM ĐẶT TIÊU ĐỀ THÔNG MINH ---
-    const getInvoiceTitle = (bill) => {
-        const monthlyKeywords = ['Điện', 'Nước', 'Dịch vụ', 'Quản lý', 'Gửi xe', 'Rác'];
-        const feeNames = bill.items ? bill.items.map(i => i.fee_name) : [];
+    // Hàm chuẩn bị dữ liệu cho Modal Thanh Toán từ danh sách
+    const handleOpenPayment = (bill) => {
+        // Logic này để đảm bảo tính tổng tiền giống hệt bên trong RoomBillDetail
+        // Tổng thanh toán = Tổng hóa đơn + Số dư ví (hoặc nợ cũ)
+        const walletBalance = parseFloat(bill.balance || bill.household_balance || 0);
+        const currentAmount = parseFloat(bill.total_amount || 0);
         
-        const isMonthlyBill = feeNames.some(name => 
-            monthlyKeywords.some(keyword => name.toLowerCase().includes(keyword.toLowerCase()))
-        );
-
-        const prefix = bill.status === 'PAID' ? "Biên lai" : "Khoản phí";
-
-        if (isMonthlyBill) {
-            return `${prefix} tháng ${bill.month}/${bill.year}`;
-        } else {
-            if (bill.status === 'PAID') {
-                return `Biên lai: ${feeNames.join(', ')}`;
-            } else {
-                return feeNames.join(', ');
-            }
-        }
+        const finalBill = {
+            ...bill,
+            // Cập nhật lại tổng tiền cần thanh toán bao gồm cả số dư
+            total_amount: currentAmount + walletBalance 
+        };
+        setPaymentInvoice(finalBill);
     };
 
+    const getInvoiceTitle = (bill) => {
+        const monthlyKeywords = ['Điện', 'Nước', 'Dịch vụ', 'Quản lý', 'Gửi xe', 'Rác'];
+        const feeNames = bill.items ? bill.items.map(i => i.fee_name || i.description || (i.FeeDefinition ? i.FeeDefinition.name : "") || "") : [];
+        const isMonthlyBill = feeNames.some(name => monthlyKeywords.some(keyword => (name || '').toLowerCase().includes(keyword.toLowerCase())));
+        const prefix = bill.status === 'PAID' ? "Biên lai" : "Khoản phí";
+
+        if (isMonthlyBill) return `${prefix} tháng ${bill.month}/${bill.year}`;
+        const validNames = feeNames.filter(n => n && n.trim() !== '');
+        return validNames.length === 0 ? `${prefix} chung` : (bill.status === 'PAID' ? `Biên lai: ${validNames.join(', ')}` : validNames.join(', '));
+    };
+
+    // --- LOGIC TÍNH TOÁN TÀI CHÍNH ---
+    const financialSummary = useMemo(() => {
+        if (!bills || bills.length === 0) return { totalDebt: 0, totalPaid: 0, countUnpaid: 0, walletBalance: 0, netStatus: 0 };
+        
+        const walletBalance = parseFloat(bills[0].household_balance || bills[0].balance || 0);
+
+        const stats = bills.reduce((acc, bill) => {
+            const amount = parseFloat(bill.total_amount) || 0;
+            if (bill.status === 'PAID') {
+                acc.totalPaid += amount;
+            } else {
+                acc.totalDebt += amount;
+                acc.countUnpaid += 1;
+            }
+            return acc;
+        }, { totalDebt: 0, totalPaid: 0, countUnpaid: 0 });
+
+        const netStatus = walletBalance - stats.totalDebt;
+
+        return { ...stats, walletBalance, netStatus };
+    }, [bills]);
+
+    const filteredBills = useMemo(() => {
+        if (!bills) return [];
+        if (filterStatus === 'ALL') return bills;
+        return bills.filter(bill => {
+            if (filterStatus === 'UNPAID') return bill.status !== 'PAID';
+            return bill.status === filterStatus;
+        });
+    }, [bills, filterStatus]);
+
     return (
-        <div className="min-h-screen bg-gray-50 flex flex-col items-center pt-10 px-4">
+        <div className="min-h-screen bg-gray-50 flex flex-col items-center pt-6 px-4 pb-20">
             
-            {/* --- HEADER --- */}
-            <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-2xl mb-8 border-t-4 border-blue-600">
-                <div className="flex justify-center mb-4">
-                    <div className="bg-blue-100 p-3 rounded-full">
-                        <Zap size={32} className="text-blue-600" />
-                    </div>
-                </div>
-                <h1 className="text-2xl font-bold text-center text-blue-700 mb-2">CỔNG DỊCH VỤ CƯ DÂN</h1>
-                <p className="text-center text-gray-500 mb-6">Tra cứu & Thanh toán biên lai trực tuyến</p>
+            {/* HEADER */}
+            <div className="bg-white p-6 rounded-xl shadow-lg w-full max-w-2xl mb-6 border-t-4 border-blue-600">
+                <h1 className="text-xl font-bold text-blue-800 flex items-center gap-2">
+                    <Zap size={24} className="text-blue-600" /> CỔNG DỊCH VỤ CƯ DÂN
+                </h1>
+                <p className="text-xs text-gray-500 mb-4 ml-8">Tra cứu công nợ & Số dư ví</p>
                 
                 <form onSubmit={handleSearch} className="flex gap-2">
-                    <input 
-                        type="text" 
-                        placeholder="Nhập mã căn hộ (VD: P101)..." 
-                        className="flex-1 border p-3 rounded-lg text-lg focus:outline-blue-500 focus:ring-2 focus:ring-blue-200 transition-all uppercase font-semibold text-gray-700"
-                        value={code}
-                        onChange={e => setCode(e.target.value.toUpperCase())}
-                    />
-                    <button 
-                        disabled={loading}
-                        className="bg-blue-600 text-white px-6 py-3 rounded-lg font-bold hover:bg-blue-700 flex items-center gap-2 transition-colors disabled:bg-gray-400 shadow-md"
-                    >
-                        {loading ? '...' : <><Search size={20}/> Tra cứu</>}
+                    <div className="relative flex-1">
+                        <Phone className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+                        <input 
+                            type="text" placeholder="Nhập SĐT..." 
+                            className="w-full border p-3 pl-10 rounded-lg focus:outline-blue-500 transition-all"
+                            value={phone} onChange={e => setPhone(e.target.value)}
+                        />
+                    </div>
+                    <button disabled={loading} className="bg-blue-600 text-white px-4 rounded-lg font-bold hover:bg-blue-700 disabled:bg-gray-400 shadow-md">
+                        {loading ? '...' : <Search size={20}/>}
                     </button>
                 </form>
-                {error && <div className="mt-4 p-3 bg-red-50 text-red-600 rounded text-center border border-red-100 flex items-center justify-center gap-2"><AlertCircle size={18}/> {error}</div>}
+                {error && <div className="mt-3 p-2 bg-red-50 text-red-600 text-sm rounded flex gap-2"><AlertCircle size={16}/> {error}</div>}
             </div>
 
-            {/* --- KẾT QUẢ --- */}
-            {bills && bills.length === 0 && !error && (
-                <div className="text-gray-500 italic mt-4 flex flex-col items-center gap-2">
-                    <FileText size={48} className="text-gray-300"/>
-                    <p>Không tìm thấy dữ liệu nào cho căn hộ này.</p>
-                </div>
-            )}
-
+            {/* DASHBOARD */}
             {bills && bills.length > 0 && (
-                <div className="w-full max-w-2xl space-y-4 pb-10">
-                    <h3 className="font-bold text-gray-700 ml-1 border-l-4 border-blue-600 pl-3 flex items-baseline gap-2 mb-4">
-                        Kết quả cho: <span className="text-blue-600 text-xl font-bold">{code}</span> 
-                        <span className="text-gray-400 font-normal text-sm">({bills[0].owner_name})</span>
-                    </h3>
+                <div className="w-full max-w-2xl animate-fade-in-up">
                     
-                    {bills.map((bill) => (
-                        <div key={bill.id} className="bg-white p-5 rounded-lg shadow-sm border border-gray-100 flex flex-col sm:flex-row justify-between items-start sm:items-center hover:shadow-md transition-shadow gap-4 relative overflow-hidden group">
-                            
-                            {/* Dải màu trạng thái bên trái */}
-                            <div className={`absolute left-0 top-0 bottom-0 w-1 ${bill.status === 'PAID' ? 'bg-green-500' : 'bg-orange-500'}`}></div>
-
-                            {/* Thông tin bên trái */}
-                            <div className="flex-1 pl-2">
-                                <div className="flex items-center gap-2 mb-1">
-                                    <span className={`font-bold text-lg group-hover:text-blue-600 transition-colors ${bill.status === 'PAID' ? 'text-gray-700' : 'text-gray-800'}`}>
-                                        {getInvoiceTitle(bill)}
+                    {/* KHU VỰC TÀI CHÍNH (3 Cards) */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
+                        
+                        {/* 1. VÍ CƯ DÂN */}
+                        <div className="bg-gradient-to-br from-indigo-500 to-blue-600 p-4 rounded-xl shadow-lg text-white relative overflow-hidden sm:col-span-3 md:col-span-1">
+                            <div className="absolute -right-4 -top-4 bg-white/10 w-24 h-24 rounded-full blur-xl"></div>
+                            <p className="text-blue-100 text-xs font-bold uppercase tracking-wider flex items-center gap-1 mb-1">
+                                <Wallet size={14}/> Số dư ví
+                            </p>
+                            <h3 className="text-2xl font-bold">
+                                {financialSummary.walletBalance.toLocaleString()} đ
+                            </h3>
+                            <div className="mt-2 pt-2 border-t border-white/20 text-xs text-blue-100">
+                                {financialSummary.netStatus >= 0 ? (
+                                    <span className="flex items-center gap-1 text-green-300 font-bold">
+                                        <CheckCircle size={12}/> Đủ trả nợ
                                     </span>
-                                </div>
-                                <div className="text-sm text-gray-500 mb-2 flex items-center gap-3">
-                                    <span className="bg-gray-100 px-2 py-0.5 rounded text-xs font-mono text-gray-600">#{bill.id}</span>
-                                    <span className="flex items-center gap-1">
-                                        <Calendar size={14}/> 
-                                        {/* [SỬA LỖI TẠI ĐÂY] Dùng hàm formatDate an toàn */}
-                                        {formatDate(bill.createdAt || bill.created_at)}
-                                    </span>
-                                </div>
-                                <div className={`text-2xl font-bold ${bill.status === 'PAID' ? 'text-green-600' : 'text-blue-600'}`}>
-                                    {parseFloat(bill.total_amount).toLocaleString()} đ
-                                </div>
-                            </div>
-
-                            {/* Nút hành động bên phải */}
-                            <div className="flex flex-col items-end gap-3 w-full sm:w-auto">
-                                {bill.status === 'PAID' ? (
-                                    <>
-                                        <span className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-xs font-bold flex items-center gap-1 uppercase tracking-wide border border-green-200">
-                                            <CheckCircle size={14}/> Đã thanh toán
-                                        </span>
-                                        <button 
-                                            onClick={() => setSelectedInvoice(bill)}
-                                            className="text-blue-600 hover:text-blue-800 hover:bg-blue-50 px-3 py-2 rounded-lg transition-colors text-sm font-medium flex items-center gap-1"
-                                        >
-                                            <FileText size={16}/> Xem chi tiết
-                                        </button>
-                                    </>
                                 ) : (
-                                    <>
-                                        {/* Nút mở Modal thanh toán thủ công */}
-                                        <button 
-                                            onClick={() => setPaymentInvoice(bill)}
-                                            className="w-full sm:w-auto bg-red-500 hover:bg-red-600 text-white px-5 py-2.5 rounded-lg text-sm font-bold flex justify-center items-center gap-2 shadow-md hover:shadow-lg transition-all transform hover:-translate-y-0.5"
-                                        >
-                                            <CreditCard size={18}/> THANH TOÁN NGAY
-                                        </button>
-
-                                        <button 
-                                            onClick={() => setSelectedInvoice(bill)}
-                                            className="text-gray-500 hover:text-blue-600 px-3 py-1 text-sm font-medium flex items-center gap-1 hover:underline"
-                                        >
-                                            <FileText size={16}/> Xem chi tiết
-                                        </button>
-                                    </>
+                                    <span className="flex items-center gap-1 text-orange-300 font-bold">
+                                        <AlertCircle size={12}/> Thiếu {Math.abs(financialSummary.netStatus).toLocaleString()}đ
+                                    </span>
                                 )}
                             </div>
                         </div>
-                    ))}
+
+                        {/* 2. CẦN THANH TOÁN */}
+                        <div className={`bg-white p-4 rounded-xl shadow-sm border relative group cursor-pointer transition-all ${filterStatus === 'UNPAID' ? 'border-orange-500 ring-1 ring-orange-500 bg-orange-50' : 'border-orange-100 hover:border-orange-300'}`} onClick={() => setFilterStatus('UNPAID')}>
+                            <div className={`absolute top-2 right-2 p-1.5 rounded-full ${financialSummary.countUnpaid > 0 ? 'bg-orange-100 text-orange-600' : 'bg-gray-100 text-gray-400'}`}>
+                                <CreditCard size={16}/>
+                            </div>
+                            <p className="text-gray-500 text-xs font-bold uppercase mb-1">Nợ hiện tại</p>
+                            <h3 className="text-xl font-bold text-gray-800 group-hover:text-orange-600 transition-colors">
+                                {financialSummary.totalDebt.toLocaleString()} đ
+                            </h3>
+                            <p className="text-xs text-orange-500 mt-1 font-medium">
+                                {financialSummary.countUnpaid} hóa đơn
+                            </p>
+                        </div>
+
+                        {/* 3. ĐÃ THANH TOÁN */}
+                        <div className={`bg-white p-4 rounded-xl shadow-sm border relative group cursor-pointer transition-all ${filterStatus === 'PAID' ? 'border-green-500 ring-1 ring-green-500 bg-green-50' : 'border-green-100 hover:border-green-300'}`} onClick={() => setFilterStatus('PAID')}>
+                            <div className="absolute top-2 right-2 p-1.5 rounded-full bg-green-100 text-green-600">
+                                <History size={16}/>
+                            </div>
+                            <p className="text-gray-500 text-xs font-bold uppercase mb-1">Đã thanh toán</p>
+                            <h3 className="text-xl font-bold text-gray-800 group-hover:text-green-600 transition-colors">
+                                {financialSummary.totalPaid.toLocaleString()} đ
+                            </h3>
+                            <p className="text-xs text-green-500 mt-1 font-medium">Lịch sử</p>
+                        </div>
+                    </div>
+
+                    {/* FILTER TABS */}
+                    <div className="flex items-center gap-2 mb-4">
+                        {[
+                            { id: 'ALL', label: 'Tất cả', icon: null },
+                            { id: 'UNPAID', label: 'Chưa trả', icon: AlertCircle },
+                            { id: 'PAID', label: 'Lịch sử', icon: CheckCircle }
+                        ].map(tab => (
+                            <button 
+                                key={tab.id}
+                                onClick={() => setFilterStatus(tab.id)}
+                                className={`px-4 py-2 rounded-full text-sm font-bold flex items-center gap-1.5 transition-all ${
+                                    filterStatus === tab.id 
+                                    ? 'bg-gray-800 text-white shadow-lg transform scale-105' 
+                                    : 'bg-white text-gray-500 border border-gray-200 hover:bg-gray-100'
+                                }`}
+                            >
+                                {tab.icon && <tab.icon size={14}/>} {tab.label}
+                            </button>
+                        ))}
+                    </div>
+
+                    {/* LIST */}
+                    <div className="space-y-3 pb-10">
+                        <div className="flex justify-between items-end px-1">
+                             <span className="text-gray-500 text-sm">Chủ hộ: <b>{bills[0].owner_name}</b> ({bills[0].apartment_code})</span>
+                        </div>
+                        
+                        {filteredBills.length === 0 ? (
+                            <div className="text-center py-8 bg-white rounded-xl border border-dashed text-gray-400">Không có dữ liệu</div>
+                        ) : (
+                            filteredBills.map((bill) => (
+                                <div key={bill.id} className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex flex-col sm:flex-row gap-4 items-start sm:items-center relative overflow-hidden group hover:shadow-md transition-all">
+                                    <div className={`absolute left-0 top-0 bottom-0 w-1.5 ${bill.status === 'PAID' ? 'bg-green-500' : 'bg-orange-500'}`}></div>
+                                    
+                                    <div className="flex-1 pl-2">
+                                        <h4 className={`font-bold ${bill.status === 'PAID' ? 'text-gray-600' : 'text-gray-800'}`}>{getInvoiceTitle(bill)}</h4>
+                                        <div className="flex gap-3 text-xs text-gray-500 mt-1">
+                                            <span className="bg-gray-100 px-1.5 rounded">#{bill.id}</span>
+                                            <span className="flex items-center gap-1"><Calendar size={12}/> {formatDate(bill.createdAt || bill.created_at)}</span>
+                                        </div>
+                                    </div>
+
+                                    <div className="text-right min-w-[100px]">
+                                        <div className={`text-lg font-bold ${bill.status === 'PAID' ? 'text-green-600' : 'text-blue-600'}`}>
+                                            {parseFloat(bill.total_amount).toLocaleString()} đ
+                                        </div>
+                                    </div>
+
+                                    <div className="flex gap-2 w-full sm:w-auto justify-end">
+                                        {/* NÚT THANH TOÁN (Chỉ hiện khi chưa trả) */}
+                                        {bill.status !== 'PAID' && (
+                                            <button 
+                                                onClick={() => handleOpenPayment(bill)} 
+                                                className="bg-blue-600 hover:bg-blue-700 text-white p-2 px-3 rounded-lg shadow-md transition-transform active:scale-95 flex items-center gap-2 font-bold text-sm"
+                                            >
+                                                <CreditCard size={18}/> Thanh toán
+                                            </button>
+                                        )}
+                                        {/* NÚT XEM CHI TIẾT */}
+                                        <button onClick={() => setSelectedInvoice(bill)} className="bg-gray-100 hover:bg-gray-200 text-gray-600 p-2 rounded-lg transition-colors">
+                                            <ArrowRight size={18}/>
+                                        </button>
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
                 </div>
             )}
 
-            {/* --- MODAL CHI TIẾT --- */}
+            {/* MODAL CHI TIẾT (Có prop onRefresh để cập nhật list nếu thanh toán bên trong) */}
             {selectedInvoice && (
                 <RoomBillDetail 
                     invoice={selectedInvoice} 
                     onClose={() => setSelectedInvoice(null)} 
-                    readOnly={true} 
+                    onRefresh={handleSearch} 
+                    readOnly={true} // Cho phép hiện nút thanh toán bên trong chi tiết
                 />
             )}
 
-            {/* --- MODAL THANH TOÁN (THỦ CÔNG) --- */}
+            {/* MODAL THANH TOÁN (Trực tiếp từ danh sách) */}
             {paymentInvoice && (
-                <PaymentModal
-                    invoice={paymentInvoice}
-                    onClose={() => setPaymentInvoice(null)}
-                    onSuccess={() => {
-                        setPaymentInvoice(null);
-                        handleSearch(); // Load lại danh sách sau khi user xác nhận
+                <PaymentModal 
+                    invoice={paymentInvoice} 
+                    onClose={() => setPaymentInvoice(null)} 
+                    onSuccess={() => { 
+                        setPaymentInvoice(null); 
+                        handleSearch(); // Tải lại dữ liệu sau khi thanh toán
                     }} 
                 />
             )}
-
         </div>
     );
 };

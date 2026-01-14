@@ -3,7 +3,7 @@ const { Op } = require('sequelize');
 const { calculateTieredFee } = require('../services/BillCalculator');
 
 // ==========================================
-// 1. TÍNH PHÍ THÁNG (Tạo Invoice Draft)
+// 1. TÍNH PHÍ THÁNG (Recalculate)
 // ==========================================
 exports.generateInvoices = async (req, res) => {
     const { month, year, debug } = req.body;
@@ -12,29 +12,18 @@ exports.generateInvoices = async (req, res) => {
     try {
         console.log(`--- TÍNH PHÍ THÁNG ${month}/${year} ---`);
 
-        // 1. Lấy danh sách căn hộ & Hộ dân (Kèm số dư ví)
         const occupiedApartments = await Apartment.findAll({
-            include: [{ 
-                model: Household, 
-                as: 'Households', 
-                where: { status: 'ACTIVE' }, 
-                required: true 
-            }],
+            include: [{ model: Household, as: 'Households', where: { status: 'ACTIVE' }, required: true }],
             transaction: t
         });
 
-        // 2. Lấy danh sách TẤT CẢ các loại phí định kỳ (để xóa sạch dữ liệu cũ)
         const allRecurringFees = await FeeDefinition.findAll({
-            attributes: ['id'],
-            where: { category: { [Op.ne]: 'OTHER' } },
-            transaction: t
+            attributes: ['id'], where: { category: { [Op.ne]: 'OTHER' } }, transaction: t
         });
         const allRecurringFeeIds = allRecurringFees.map(f => f.id);
 
-        // 3. Lấy danh sách phí ĐANG HOẠT ĐỘNG (để tính mới)
         const activeFees = await FeeDefinition.findAll({
-            where: { is_active: true, category: { [Op.ne]: 'OTHER' } },
-            transaction: t
+            where: { is_active: true, category: { [Op.ne]: 'OTHER' } }, transaction: t
         });
 
         let countCreated = 0;
@@ -42,36 +31,46 @@ exports.generateInvoices = async (req, res) => {
         for (const apt of occupiedApartments) {
             const household = apt.Households[0]; 
 
-            // Tìm/Tạo Invoice Header
             let [invoice, created] = await Invoice.findOrCreate({
                 where: { household_id: household.id, month, year },
                 defaults: { status: 'DRAFT', total_amount: 0 },
                 transaction: t
             });
 
-            // Nếu đã chốt sổ (và không phải debug) thì bỏ qua
-            if (!debug && ['PAID', 'ISSUED'].includes(invoice.status)) continue;
+            // Nếu không phải debug và đã thanh toán thì bỏ qua (nếu muốn chặn tính lại PAID)
+            // Nhưng logic mới của bạn là CHO PHÉP tính lại PAID để bù trừ ví, nên ta bỏ qua check này hoặc chỉ check logic debug.
+            // if (!debug && ['PAID'].includes(invoice.status)) continue; 
+            
             if (created) countCreated++;
 
+            // --- [FIX QUAN TRỌNG: XỬ LÝ TRẠNG THÁI] ---
+            // 1. Nếu đang là ISSUED (Đã phát hành) -> Đưa về DRAFT (Nháp) để có thể Chốt sổ lại.
+            if (invoice.status === 'ISSUED') {
+                invoice.status = 'DRAFT';
+                invoice.issued_at = null; // Xóa ngày phát hành cũ
+            }
+            // 2. Nếu là PAID (Đã thanh toán) -> Giữ nguyên PAID, chỉ cập nhật tiền.
+            
+            // Lưu tổng tiền cũ để tính chênh lệch cho PAID
+            const oldTotal = parseFloat(invoice.total_amount || 0);
+
             // --- A. XÓA DỮ LIỆU CŨ ---
-            // 1. Hoàn lại tiền ví nếu hóa đơn cũ đã trừ tiền ví (tránh trừ 2 lần)
-            const oldDeduction = await InvoiceItem.findOne({
-                where: { invoice_id: invoice.id, unit_price: { [Op.lt]: 0 } }, // Tìm item âm
-                transaction: t
-            });
-            if (oldDeduction) {
-                const refundAmount = Math.abs(parseFloat(oldDeduction.amount));
-                await household.increment('balance', { by: refundAmount, transaction: t });
-                await oldDeduction.destroy({ transaction: t });
+            // Nếu là DRAFT (hoặc vừa chuyển từ ISSUED về DRAFT), hoàn lại tiền ví ảo cũ
+            if (invoice.status === 'DRAFT') {
+                const oldDeduction = await InvoiceItem.findOne({
+                    where: { invoice_id: invoice.id, unit_price: { [Op.lt]: 0 } },
+                    transaction: t
+                });
+                if (oldDeduction) {
+                    await household.increment('balance', { by: Math.abs(parseFloat(oldDeduction.amount)), transaction: t });
+                    await oldDeduction.destroy({ transaction: t });
+                }
             }
 
-            // 2. Xóa các khoản phí định kỳ cũ
+            // Xóa các khoản phí định kỳ để tính lại
             if (allRecurringFeeIds.length > 0) {
                 await InvoiceItem.destroy({
-                    where: { 
-                        invoice_id: invoice.id, 
-                        fee_definition_id: { [Op.in]: allRecurringFeeIds } 
-                    },
+                    where: { invoice_id: invoice.id, fee_definition_id: { [Op.in]: allRecurringFeeIds } },
                     transaction: t
                 });
             }
@@ -81,32 +80,24 @@ exports.generateInvoices = async (req, res) => {
                 let amount = 0, quantity = 0, description = '', details = null;
 
                 if (fee.calc_method === 'FIXED') {
-                    quantity = 1;
-                    amount = parseFloat(fee.unit_price);
+                    quantity = 1; amount = parseFloat(fee.unit_price);
                     description = 'Phí cố định hàng tháng';
-                } 
-                else if (fee.calc_method === 'BY_AREA') {
-                    // Lấy diện tích an toàn
+                } else if (fee.calc_method === 'BY_AREA') {
                     quantity = parseFloat(apt.area || 0);
-                    const price = parseFloat(fee.unit_price || 0);
-                    amount = Math.round(quantity * price); // Làm tròn
+                    amount = Math.round(quantity * parseFloat(fee.unit_price || 0));
                     description = `Diện tích: ${quantity} m²`;
-                }
-                else if (['BY_METER', 'TIERED'].includes(fee.calc_method)) {
+                } else if (['BY_METER', 'TIERED'].includes(fee.calc_method)) {
                     const reading = await MeterReading.findOne({
                         where: { apartment_id: apt.id, fee_definition_id: fee.id, month, year },
                         transaction: t
                     });
-
                     if (reading) {
                         quantity = Number(reading.new_value) - Number(reading.old_value);
                         if (quantity < 0) quantity = 0;
-
                         description = `Tiêu thụ: ${quantity} ${fee.unit}`;
                         if (fee.calc_method === 'TIERED') {
                             const result = calculateTieredFee(quantity, fee.tier_config);
-                            amount = result.total;
-                            details = result.breakdown;
+                            amount = result.total; details = result.breakdown;
                         } else {
                             amount = quantity * parseFloat(fee.unit_price);
                         }
@@ -115,59 +106,65 @@ exports.generateInvoices = async (req, res) => {
 
                 if (amount > 0) {
                     await InvoiceItem.create({
-                        invoice_id: invoice.id,
-                        fee_definition_id: fee.id,
-                        description, quantity,
+                        invoice_id: invoice.id, fee_definition_id: fee.id,
+                        description, quantity, amount, metadata: details,
                         unit_price: fee.calc_method !== 'TIERED' ? fee.unit_price : 0,
-                        amount, metadata: details
                     }, { transaction: t });
                 }
             }
 
-            // --- C. KHẤU TRỪ SỐ DƯ VÍ (NẾU CÓ) ---
-            // Tính tổng tiền tạm thời
-            const currentTotal = await InvoiceItem.sum('amount', { where: { invoice_id: invoice.id }, transaction: t }) || 0;
+            // --- C. TÍNH TỔNG MỚI ---
+            const finalTotal = await InvoiceItem.sum('amount', { where: { invoice_id: invoice.id }, transaction: t }) || 0;
+
+            // --- D. XỬ LÝ SỐ DƯ (LOGIC KHÁC NHAU GIỮA DRAFT VÀ PAID) ---
             
-            // Reload household để lấy balance mới nhất (sau khi hoàn tiền ở bước A.1)
-            await household.reload({ transaction: t });
-            const currentBalance = parseFloat(household.balance || 0);
-
-            if (currentBalance > 0 && currentTotal > 0) {
-                // Trừ tối đa bằng tổng tiền hóa đơn hoặc số dư ví
-                const deductionAmount = Math.min(currentTotal, currentBalance);
+            if (invoice.status === 'PAID') {
+                // Nếu đã thanh toán: Tính chênh lệch và cập nhật vào ví thật
+                const difference = oldTotal - finalTotal;
+                if (difference !== 0) {
+                    await household.increment('balance', { by: difference, transaction: t });
+                }
+                // Update total mới vào hóa đơn
+                invoice.total_amount = finalTotal;
+            } 
+            else { 
+                // Nếu là DRAFT (Vừa được reset từ ISSUED hoặc mới tạo): Trừ ví tự động (Khấu trừ)
+                await household.reload({ transaction: t });
+                const currentBalance = parseFloat(household.balance || 0);
                 
-                // Tạo item âm để trừ tiền
-                await InvoiceItem.create({
-                    invoice_id: invoice.id,
-                    description: `Sử dụng số dư ví (Còn lại: ${(currentBalance - deductionAmount).toLocaleString()}đ)`,
-                    quantity: 1,
-                    unit_price: -deductionAmount,
-                    amount: -deductionAmount,
-                    // Có thể tạo 1 loại phí hệ thống 'WALLET' nếu cần, ở đây để null hoặc OTHER
-                }, { transaction: t });
-
-                // Trừ tiền trong ví
-                await household.decrement('balance', { by: deductionAmount, transaction: t });
+                // Cần tính lại finalTotal vì có thể vừa add items ở bước B
+                // Logic khấu trừ: Nếu có tiền trong ví -> Trừ vào hóa đơn ngay
+                if (currentBalance > 0 && finalTotal > 0) {
+                    const deductionAmount = Math.min(finalTotal, currentBalance);
+                    await InvoiceItem.create({
+                        invoice_id: invoice.id,
+                        description: `Sử dụng số dư ví (Còn lại: ${(currentBalance - deductionAmount).toLocaleString()}đ)`,
+                        quantity: 1, unit_price: -deductionAmount, amount: -deductionAmount,
+                    }, { transaction: t });
+                    
+                    await household.decrement('balance', { by: deductionAmount, transaction: t });
+                    
+                    // Cập nhật lại total_amount sau khi trừ
+                    invoice.total_amount = finalTotal - deductionAmount;
+                } else {
+                    invoice.total_amount = finalTotal;
+                }
             }
 
-            // --- D. CẬP NHẬT TỔNG TIỀN CUỐI CÙNG ---
-            const finalTotal = await InvoiceItem.sum('amount', { where: { invoice_id: invoice.id }, transaction: t });
-            invoice.total_amount = finalTotal || 0;
             await invoice.save({ transaction: t });
         }
 
         await t.commit();
         res.json({ message: "Tính phí thành công!", details: `Đã xử lý ${occupiedApartments.length} căn hộ.` });
-
     } catch (err) {
         await t.rollback();
-        console.error("Generate Error:", err);
+        console.error(err);
         res.status(500).json({ error: err.message });
     }
 };
 
 // ==========================================
-// 2. TÌM KIẾM HÓA ĐƠN (ADMIN)
+// 2. SEARCH INVOICES
 // ==========================================
 exports.searchInvoices = async (req, res) => {
     const { code, month, year } = req.query;
@@ -231,7 +228,7 @@ exports.searchInvoices = async (req, res) => {
 };
 
 // ==========================================
-// 3. CHỐT SỔ (PUBLISH)
+// 3. PUBLISH INVOICES (Draft -> Issued)
 // ==========================================
 exports.publishInvoices = async (req, res) => {
     const { month, year } = req.body;
@@ -247,7 +244,7 @@ exports.publishInvoices = async (req, res) => {
 };
 
 // ==========================================
-// 4. THÊM PHÍ LẺ (AD-HOC)
+// 4. ADD AD-HOC ITEM
 // ==========================================
 exports.addAdHocItem = async (req, res) => {
     const { apartment_codes, fee_name, amount, description, month, year } = req.body;
@@ -280,9 +277,12 @@ exports.addAdHocItem = async (req, res) => {
                  }, { transaction: t });
             }
 
-            if (invoice.status === 'PAID') continue;
-
+            // If invoice is PAID, deduct from wallet as this is a new charge
             const val = parseFloat(amount);
+            if (invoice.status === 'PAID') {
+                await household.decrement('balance', { by: val, transaction: t });
+            }
+
             await InvoiceItem.create({
                 invoice_id: invoice.id,
                 fee_definition_id: otherFee.id,
@@ -303,7 +303,7 @@ exports.addAdHocItem = async (req, res) => {
 };
 
 // ==========================================
-// 5. CẬP NHẬT CHI TIẾT HÓA ĐƠN
+// 5. UPDATE INVOICE (Balance Logic Here)
 // ==========================================
 exports.updateInvoice = async (req, res) => {
     const { id } = req.params;
@@ -311,13 +311,17 @@ exports.updateInvoice = async (req, res) => {
     const t = await sequelize.transaction();
 
     try {
-        const invoice = await Invoice.findByPk(id);
-        if (!invoice || invoice.status === 'PAID') {
+        const invoice = await Invoice.findByPk(id, { include: ['Household'], transaction: t });
+        if (!invoice) {
             await t.rollback();
-            return res.status(400).json({ message: "Không thể sửa hóa đơn đã thanh toán." });
+            return res.status(404).json({ message: "Không tìm thấy hóa đơn." });
         }
 
-        // 1. Xử lý xóa items
+        // --- ALLOW EDITS FOR ALL STATUSES ---
+        
+        const oldTotal = parseFloat(invoice.total_amount || 0);
+
+        // 1. Process deletions
         if (deletedIds && deletedIds.length > 0) {
             await InvoiceItem.destroy({
                 where: {
@@ -328,18 +332,18 @@ exports.updateInvoice = async (req, res) => {
             });
         }
 
-        // 2. Cập nhật / Thêm mới items
+        // 2. Process updates/creations
         if (items && items.length > 0) {
             for (const item of items) {
                 if (item.id) {
-                    // Update
+                    // Update existing
                     const invoiceItem = await InvoiceItem.findByPk(item.id, { transaction: t });
                     if (invoiceItem && invoiceItem.invoice_id === invoice.id) {
                         invoiceItem.quantity = item.quantity;
                         invoiceItem.unit_price = item.unit_price;
                         invoiceItem.amount = item.amount;
-                        invoiceItem.description = item.description;
-                        if (item.fee_name) invoiceItem.description = item.fee_name; // Fallback
+                        invoiceItem.description = item.description || invoiceItem.description;
+                        if (item.fee_name) invoiceItem.description = item.fee_name;
                         await invoiceItem.save({ transaction: t });
                     }
                 } else {
@@ -363,9 +367,23 @@ exports.updateInvoice = async (req, res) => {
             }
         }
 
-        // 3. Tính lại tổng tiền
-        const newTotal = await InvoiceItem.sum('amount', { where: { invoice_id: invoice.id }, transaction: t });
-        invoice.total_amount = newTotal || 0;
+        // 3. Recalculate total
+        const newTotalData = await InvoiceItem.sum('amount', { where: { invoice_id: invoice.id }, transaction: t });
+        const newTotal = parseFloat(newTotalData || 0);
+
+        // 4. [BALANCE LOGIC] Only if PAID
+        if (invoice.status === 'PAID') {
+            const difference = oldTotal - newTotal;
+            // difference > 0: Old was higher -> Customer overpaid -> Add to balance
+            // difference < 0: Old was lower -> Customer underpaid -> Deduct from balance
+            
+            if (difference !== 0) {
+                await invoice.Household.increment('balance', { by: difference, transaction: t });
+            }
+        }
+
+        // 5. Save invoice
+        invoice.total_amount = newTotal;
         await invoice.save({ transaction: t });
 
         await t.commit();
@@ -377,7 +395,7 @@ exports.updateInvoice = async (req, res) => {
 };
 
 // ==========================================
-// 6. XÓA HÓA ĐƠN & HOÀN TIỀN VÍ
+// 6. DELETE INVOICE
 // ==========================================
 exports.deleteInvoice = async (req, res) => {
     const { id } = req.params;
@@ -385,21 +403,25 @@ exports.deleteInvoice = async (req, res) => {
     try {
         const invoice = await Invoice.findByPk(id, { include: ['Items', 'Household'] });
         if (!invoice) { await t.rollback(); return res.status(404).json({message: "Not found"}); }
-        if (invoice.status === 'PAID') { await t.rollback(); return res.status(400).json({message: "Đã thanh toán, không thể xóa."}); }
-
-        // 1. Kiểm tra xem có mục nào trừ tiền ví (số âm) không để hoàn tiền
-        const deductionItem = invoice.Items.find(item => item.amount < 0 && item.description.includes('số dư ví'));
-        if (deductionItem) {
-            const refundAmount = Math.abs(parseFloat(deductionItem.amount));
-            await invoice.Household.increment('balance', { by: refundAmount, transaction: t });
+        
+        // If PAID, refund the full amount to balance
+        if (invoice.status === 'PAID') {
+             const amountPaid = parseFloat(invoice.total_amount);
+             await invoice.Household.increment('balance', { by: amountPaid, transaction: t });
         }
 
-        // 2. Xóa
+        // Refund any explicit deduction items
+        const deductionItem = invoice.Items.find(item => item.amount < 0 && item.description.includes('số dư ví'));
+        if (deductionItem) {
+            const deductionAmount = Math.abs(parseFloat(deductionItem.amount));
+            await invoice.Household.increment('balance', { by: deductionAmount, transaction: t });
+        }
+
         await InvoiceItem.destroy({ where: { invoice_id: id }, transaction: t });
         await invoice.destroy({ transaction: t });
 
         await t.commit();
-        res.json({ message: "Đã xóa hóa đơn và hoàn lại số dư ví (nếu có)." });
+        res.json({ message: "Đã xóa hóa đơn. (Tiền đã được hoàn vào ví nếu có)." });
     } catch (err) {
         await t.rollback();
         res.status(500).json({ error: err.message });
@@ -410,51 +432,102 @@ exports.deleteInvoice = async (req, res) => {
 // 7. PUBLIC API: GET (Dân xem)
 // ==========================================
 exports.getPublicInvoices = async (req, res) => {
-    const { code } = req.query;
-    try {
-        const apt = await Apartment.findOne({ 
-            where: { code },
-            include: [{ model: Household, as: 'Households', where: { status: 'ACTIVE' } }]
-        });
-        
-        if (!apt || !apt.Households[0]) return res.status(404).json({ message: "Không tìm thấy thông tin." });
+    const { code, phone } = req.query; // Nhận thêm tham số phone
 
+    try {
+        let households = [];
+
+        // 1. Tìm hộ dân theo SĐT hoặc Mã căn
+        if (phone) {
+            // Tìm các hộ dân có SĐT khớp (Một SĐT có thể sở hữu nhiều căn)
+            households = await Household.findAll({ 
+                where: { 
+                    phone: { [Op.like]: `%${phone.trim()}%` }, // Tìm gần đúng hoặc chính xác
+                    status: 'ACTIVE' 
+                },
+                include: [{ model: Apartment, as: 'Apartment' }] // Kèm thông tin căn hộ
+            });
+        } else if (code) {
+            // Logic cũ: Tìm theo mã căn
+            const apt = await Apartment.findOne({ where: { code } });
+            if (apt) {
+                households = await Household.findAll({
+                    where: { apartment_id: apt.id, status: 'ACTIVE' },
+                    include: [{ model: Apartment, as: 'Apartment' }]
+                });
+            }
+        }
+
+        if (!households || households.length === 0) {
+            return res.status(404).json({ message: "Không tìm thấy thông tin cư dân." });
+        }
+
+        // Lấy danh sách ID của các hộ tìm được
+        const householdIds = households.map(h => h.id);
+
+        // 2. Tìm hóa đơn của các hộ này
         const invoices = await Invoice.findAll({
             where: { 
-                household_id: apt.Households[0].id, 
+                household_id: { [Op.in]: householdIds }, // Tìm theo danh sách ID
                 status: { [Op.in]: ['ISSUED', 'PAID', 'PARTIAL'] } 
             },
             include: [
-                { model: InvoiceItem, as: 'Items', include: [{ model: FeeDefinition, as: 'FeeDefinition' }] }
+                { 
+                    model: InvoiceItem, 
+                    as: 'Items', 
+                    include: [{ model: FeeDefinition, as: 'FeeDefinition' }] 
+                },
+                // Include lại Household -> Apartment để lấy mã căn hiển thị cho từng hóa đơn
+                {
+                    model: Household,
+                    as: 'Household',
+                    include: [{ model: Apartment, as: 'Apartment' }]
+                }
             ],
             order: [['year', 'DESC'], ['month', 'DESC']]
         });
-        res.json(invoices);
+
+        // 3. Format dữ liệu trả về để Frontend dễ dùng
+        const result = invoices.map(inv => ({
+            id: inv.id,
+            apartment_code: inv.Household?.Apartment?.code || 'N/A', // Trả về mã căn để hiển thị
+            owner_name: inv.Household?.owner_name,
+            phone: inv.Household?.phone,
+            household_balance: inv.Household ? parseFloat(inv.Household.balance || 0) : 0,
+            month: inv.month,
+            year: inv.year,
+            total_amount: inv.total_amount,
+            status: inv.status,
+            createdAt: inv.createdAt,
+            items: inv.Items
+        }));
+
+        res.json(result);
+
     } catch (err) {
+        console.error("Public Search Error:", err);
         res.status(500).json({ error: err.message });
     }
 };
 
 // ==========================================
-// 8. THANH TOÁN (ADMIN) - XỬ LÝ TIỀN THỪA
+// 8. ADMIN PAYMENT
 // ==========================================
 exports.payInvoice = async (req, res) => {
     const { id } = req.params;
-    const { amount_received } = req.body; // Số tiền thực nhận
+    const { amount_received } = req.body;
     const t = await sequelize.transaction();
     try {
         const inv = await Invoice.findByPk(id, { include: ['Household'] });
         if(!inv) return res.status(404).json({message: "Not found"});
         
         const totalToPay = parseFloat(inv.total_amount);
-        const received = parseFloat(amount_received || totalToPay); // Mặc định trả đủ
+        const received = parseFloat(amount_received || totalToPay);
 
-        // 1. Update trạng thái
         inv.status = 'PAID';
         inv.paid_at = new Date();
         await inv.save({ transaction: t });
         
-        // 2. Xử lý tiền thừa vào Ví
         let note = '';
         if (received > totalToPay) {
             const surplus = received - totalToPay;
@@ -462,7 +535,6 @@ exports.payInvoice = async (req, res) => {
             note = `Thừa ${surplus.toLocaleString()}đ nạp ví.`;
         }
 
-        // 3. Tạo Payment Log
         if (Payment) {
             await Payment.create({
                 invoice_id: id,
@@ -483,7 +555,7 @@ exports.payInvoice = async (req, res) => {
 };
 
 // ==========================================
-// 9. THANH TOÁN ONLINE (PUBLIC)
+// 9. PUBLIC PAYMENT
 // ==========================================
 exports.publicPayInvoice = async (req, res) => {
     const { id } = req.params;

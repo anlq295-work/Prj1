@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Trash2, RefreshCw, Plus, Calculator, Lock, Bug, Search, Filter } from 'lucide-react';
+import { Trash2, Plus, Calculator, Lock, Bug, Search, Filter, RefreshCw } from 'lucide-react';
 import { 
     generateInvoices, 
     searchInvoices, 
@@ -22,7 +22,7 @@ const BillingManager = () => {
   const [periodStatus, setPeriodStatus] = useState('OPEN');
   const [debugMode, setDebugMode] = useState(false);
 
-  // --- STATE TÌM KIẾM & BỘ LỌC (MỚI) ---
+  // --- STATE TÌM KIẾM & BỘ LỌC ---
   const [searchTerm, setSearchTerm] = useState('');
   const [filterType, setFilterType] = useState('ALL'); // ALL, HAS_ADHOC, ONLY_MONTHLY
 
@@ -65,7 +65,13 @@ const BillingManager = () => {
           setPeriodStatus(responseData.status);
       } else if (Array.isArray(responseData)) {
           setInvoices(responseData);
-          const isClosed = responseData.some(inv => inv.status === 'PENDING' || inv.status === 'PAID');
+          
+          // [FIX] Logic xác định trạng thái kỳ sổ
+          // Nếu có bất kỳ hóa đơn nào là ISSUED hoặc PAID -> Coi như kỳ này đã chốt/đang thu
+          const isClosed = responseData.some(inv => {
+              const s = (inv.status || '').toUpperCase();
+              return s === 'ISSUED' || s === 'PAID';
+          });
           setPeriodStatus(isClosed ? 'CLOSED' : 'OPEN');
       } else {
           setInvoices([]);
@@ -79,7 +85,7 @@ const BillingManager = () => {
     }
   };
 
-  // --- 3. LOGIC LỌC DỮ LIỆU (MỚI) ---
+  // --- 3. LOGIC LỌC DỮ LIỆU ---
   const filteredInvoices = useMemo(() => {
     if (!Array.isArray(invoices)) return [];
 
@@ -90,17 +96,14 @@ const BillingManager = () => {
             (inv.apartment_code || '').toLowerCase().includes(searchLower) ||
             (inv.owner_name || '').toLowerCase().includes(searchLower);
 
-        // 2. Phân loại phí (Dựa vào items trong hóa đơn)
-        // Lưu ý: Backend cần trả về items kèm FeeDefinition để logic này hoạt động chính xác
+        // 2. Phân loại phí
         let matchType = true;
-        
-        // Kiểm tra xem hóa đơn có mục phí "OTHER" (Phí khác/Phí lẻ) hay không
         const hasAdHoc = inv.items?.some(item => item.FeeDefinition?.category === 'OTHER');
         
         if (filterType === 'HAS_ADHOC') {
-            matchType = hasAdHoc; // Chỉ hiện căn có phí phát sinh
+            matchType = hasAdHoc;
         } else if (filterType === 'ONLY_MONTHLY') {
-            matchType = !hasAdHoc; // Chỉ hiện căn KHÔNG có phí phát sinh
+            matchType = !hasAdHoc;
         }
 
         return matchText && matchType;
@@ -116,14 +119,23 @@ const BillingManager = () => {
   };
 
   const handleCalculate = async () => {
-    if (debugMode && periodStatus === 'CLOSED') {
-        if (!window.confirm("⚠️ CẢNH BÁO DEBUG: Đang tính lại trên kỳ đã chốt!")) return;
+    // Cảnh báo nội dung chi tiết hơn
+    if (periodStatus === 'CLOSED' || invoices.some(i => ['ISSUED', 'PAID'].includes((i.status||'').toUpperCase()))) {
+        const confirmMsg = 
+            "⚠️ CẢNH BÁO QUAN TRỌNG:\n" +
+            "Kỳ này đã có hóa đơn ĐÃ PHÁT HÀNH hoặc ĐÃ THANH TOÁN.\n\n" +
+            "• Hóa đơn ĐÃ PHÁT HÀNH (Issued) -> Sẽ bị đưa về NHÁP để tính lại.\n" +
+            "• Hóa đơn ĐÃ THANH TOÁN (Paid) -> Sẽ tính chênh lệch và bù trừ vào VÍ.\n\n" +
+            "Bạn có chắc chắn muốn tính lại không?";
+        
+        if (!window.confirm(confirmMsg)) return;
     }
+
     setLoading(true);
     try {
       const res = await generateInvoices({ month, year, debug: debugMode });
       alert("✅ " + res.data.message);
-      handleSearch();
+      handleSearch(); // Load lại để thấy trạng thái mới (DRAFT)
     } catch (err) {
       alert("Lỗi: " + (err.response?.data?.message || err.message));
     } finally {
@@ -132,7 +144,7 @@ const BillingManager = () => {
   };
 
   const handlePublish = async () => {
-    if(!window.confirm(`Chốt sổ tháng ${month}/${year}?`)) return;
+    if(!window.confirm(`Xác nhận chốt sổ và phát hành hóa đơn tháng ${month}/${year}?`)) return;
     setLoading(true);
     try {
       const res = await publishInvoices(month, year);
@@ -159,8 +171,8 @@ const BillingManager = () => {
   };
 
   const isPeriodClosed = periodStatus === 'CLOSED';
-  const showCalculate = !isPeriodClosed || debugMode; 
-  const showPublish = !isPeriodClosed && invoices.length > 0;
+  // Luôn cho phép tính lại (Show button), nhưng sẽ có cảnh báo
+  const showPublish = invoices.length > 0; 
 
   return (
     <div className="p-6 bg-gray-50 min-h-screen">
@@ -177,12 +189,12 @@ const BillingManager = () => {
             </h1>
             <div className="flex items-center gap-2 mt-1">
                 {isPeriodClosed ? (
-                    <span className="text-sm font-bold text-red-600 bg-red-100 px-2 py-1 rounded flex items-center gap-1">
-                        <Lock size={14}/> ĐÃ CHỐT SỔ
+                    <span className="text-sm font-bold text-blue-600 bg-blue-100 px-2 py-1 rounded flex items-center gap-1">
+                        <Lock size={14}/> ĐÃ PHÁT HÀNH / ĐANG THU
                     </span>
                 ) : (
                     <span className="text-sm font-bold text-green-600 bg-green-100 px-2 py-1 rounded">
-                        🟢 ĐANG MỞ
+                        🟢 ĐANG MỞ (NHÁP)
                     </span>
                 )}
             </div>
@@ -197,11 +209,14 @@ const BillingManager = () => {
                 {[currentYear, currentYear - 1].map(y => <option key={y} value={y}>{y}</option>)}
             </select>
             
-            {showCalculate && (
-                <button onClick={handleCalculate} disabled={loading} className={`px-3 py-2 text-white rounded flex items-center gap-2 shadow-sm ${debugMode && isPeriodClosed ? 'bg-purple-600 hover:bg-purple-700 ring-2 ring-purple-300' : 'bg-blue-600 hover:bg-blue-700'}`}>
-                    <Calculator size={18} /> {debugMode && isPeriodClosed ? 'Ép Tính' : 'Tạm tính'}
-                </button>
-            )}
+            <button 
+                onClick={handleCalculate} 
+                disabled={loading} 
+                className={`px-3 py-2 text-white rounded flex items-center gap-2 shadow-sm ${isPeriodClosed ? 'bg-purple-600 hover:bg-purple-700' : 'bg-blue-600 hover:bg-blue-700'}`}
+                title="Tính lại phí dựa trên chỉ số mới nhất"
+            >
+                <Calculator size={18} /> {isPeriodClosed ? 'Tính Lại Phí' : 'Tạm tính'}
+            </button>
 
             {showPublish && (
                 <button onClick={handlePublish} disabled={loading} className="px-3 py-2 bg-red-600 text-white rounded hover:bg-red-700 flex items-center gap-2 shadow-sm">
@@ -212,12 +227,15 @@ const BillingManager = () => {
             <button onClick={() => setShowAdHocModal(true)} disabled={loading} className="px-3 py-2 bg-orange-500 text-white rounded hover:bg-orange-600 flex items-center gap-2 shadow-sm">
                 <Plus size={18} /> Phí Lẻ
             </button>
+            
+            <button onClick={handleSearch} className="p-2 bg-white border rounded hover:bg-gray-50 text-gray-600" title="Làm mới">
+                <RefreshCw size={18} className={loading ? 'animate-spin' : ''}/>
+            </button>
         </div>
       </div>
 
-      {/* SEARCH & FILTER BAR (MỚI) */}
+      {/* SEARCH & FILTER BAR */}
       <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-200 mb-4 flex flex-wrap gap-4 items-center">
-         {/* Tìm kiếm */}
          <div className="relative flex-1 min-w-[200px]">
              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
              <input 
@@ -229,7 +247,6 @@ const BillingManager = () => {
              />
          </div>
 
-         {/* Bộ lọc loại phí */}
          <div className="relative min-w-[220px]">
              <Filter className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
              <select 
@@ -271,7 +288,6 @@ const BillingManager = () => {
                         </tr>
                     ) : (
                         filteredInvoices.map(inv => {
-                            // Kiểm tra nhanh xem có phí khác không để hiện badge
                             const hasAdHoc = inv.items?.some(item => item.FeeDefinition?.category === 'OTHER');
                             
                             return (
@@ -289,20 +305,38 @@ const BillingManager = () => {
                                         </div>
                                     </td>
                                     <td className="p-4 text-right font-bold text-blue-700">{parseFloat(inv.total_amount).toLocaleString()} đ</td>
+                                    
+                                    {/* --- CỘT TRẠNG THÁI [ĐÃ SỬA ĐỂ BẮT MỌI CASE] --- */}
                                     <td className="p-4 text-center">
-                                        <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
-                                            inv.status === 'PAID' ? 'bg-green-100 text-green-700' : 
-                                            inv.status === 'PENDING' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'
+                                        <span className={`px-2.5 py-1 rounded-full text-xs font-bold border ${
+                                            (inv.status || '').toUpperCase() === 'PAID' ? 'bg-green-100 text-green-700 border-green-200' :
+                                            (inv.status || '').toUpperCase() === 'ISSUED' ? 'bg-blue-100 text-blue-700 border-blue-200' : 
+                                            (inv.status || '').toUpperCase() === 'PENDING' ? 'bg-amber-100 text-amber-700 border-amber-200' :
+                                            'bg-gray-100 text-gray-600 border-gray-200'
                                         }`}>
-                                            {inv.status === 'PAID' ? 'Đã thanh toán' : 
-                                             inv.status === 'PENDING' ? 'Chờ thanh toán' : 'Nháp'}
+                                            {(() => {
+                                                const statusUpper = (inv.status || '').toUpperCase();
+                                                switch(statusUpper) {
+                                                    case 'PAID': return 'Đã thanh toán';
+                                                    case 'ISSUED': return 'Đã phát hành'; 
+                                                    case 'PENDING': return 'Chờ thanh toán';
+                                                    case 'DRAFT': return 'Nháp';
+                                                    default: return `Nháp (${inv.status})`; // Debug
+                                                }
+                                            })()}
                                         </span>
                                     </td>
+                                    {/* ----------------------------- */}
+
                                     <td className="p-4 text-right">
                                         <div className="flex justify-end items-center gap-3">
                                             <button onClick={() => setSelectedInvoice(inv)} className="text-blue-600 font-medium hover:text-blue-800">Chi tiết</button>
-                                            {inv.status !== 'PAID' && (!isPeriodClosed || debugMode) && (
-                                                <button onClick={() => handleDelete(inv.id)} className="text-gray-400 hover:text-red-600 p-1"><Trash2 size={18} /></button>
+                                            
+                                            {/* Nút xóa: Ẩn nếu đã thanh toán hoặc đã phát hành (trừ khi debug) */}
+                                            {inv.status !== 'PAID' && (inv.status !== 'ISSUED' || debugMode) && (
+                                                <button onClick={() => handleDelete(inv.id)} className="text-gray-400 hover:text-red-600 p-1">
+                                                    <Trash2 size={18} />
+                                                </button>
                                             )}
                                         </div>
                                     </td>
@@ -318,7 +352,7 @@ const BillingManager = () => {
       {/* MODAL CHI TIẾT */}
       {selectedInvoice && <RoomBillDetail invoice={selectedInvoice} onClose={() => setSelectedInvoice(null)} onRefresh={handleSearch} />}
       
-      {/* MODAL PHÍ LẺ (GIỮ NGUYÊN) */}
+      {/* MODAL PHÍ LẺ */}
       {showAdHocModal && (
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
               <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
