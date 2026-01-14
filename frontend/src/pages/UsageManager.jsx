@@ -1,38 +1,33 @@
-import React, { useState, useEffect } from 'react';
-import { getUsages, saveUsages } from '../api';
-import { Save, RefreshCw, AlertCircle, Lock, Bug } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { getUsages, saveUsages, importUsages } from '../api';
+import { Save, RefreshCw, AlertCircle, Lock, Bug, FileSpreadsheet } from 'lucide-react';
 
 const UsageManager = () => {
   const now = new Date();
   const currentMonth = now.getMonth() + 1;
   const currentYear = now.getFullYear();
 
-  // State
+  // --- STATE ---
   const [month, setMonth] = useState(currentMonth);
   const [year, setYear] = useState(currentYear);
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
   
-  // Chế độ Debug (Ẩn, dùng phím tắt)
+  const fileInputRef = useRef(null);
   const [debugMode, setDebugMode] = useState(false);
 
-  // Logic khóa dữ liệu
   const isTimeLocked = year < currentYear || (year === currentYear && month < currentMonth);
   const isLocked = isTimeLocked && !debugMode;
-
   const maxMonthToShow = (year === currentYear) ? currentMonth : 12;
 
-  // --- 1. PHÍM TẮT DEBUG (Ctrl + Shift + D) ---
+  // --- 1. PHÍM TẮT DEBUG ---
   useEffect(() => {
     const handleKeyDown = (event) => {
         if (event.ctrlKey && event.shiftKey && (event.key === 'D' || event.key === 'd')) {
             event.preventDefault();
             setDebugMode(prev => {
                 const newState = !prev;
-                alert(newState 
-                    ? "🔓 DEBUG MODE: ON\n- Đã mở khóa chỉnh sửa cho các tháng quá khứ." 
-                    : "🔒 DEBUG MODE: OFF"
-                );
+                alert(newState ? "🔓 DEBUG MODE: ON" : "🔒 DEBUG MODE: OFF");
                 return newState;
             });
         }
@@ -41,16 +36,7 @@ const UsageManager = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  const handleYearChange = (e) => {
-    const newYear = parseInt(e.target.value);
-    setYear(newYear);
-    if (newYear < currentYear) {
-      setMonth(12);
-    } else {
-      setMonth(currentMonth);
-    }
-  };
-
+  // --- 2. LOAD DATA ---
   useEffect(() => {
     fetchData();
   }, [month, year]);
@@ -59,40 +45,45 @@ const UsageManager = () => {
     setLoading(true);
     try {
       const res = await getUsages(month, year);
-      
       const processedData = res.data.map(item => ({
           ...item,
-          // Mặc định số mới bằng số cũ nếu chưa nhập
           electric_new: item.electric_new !== null ? item.electric_new : item.electric_old,
           water_new: item.water_new !== null ? item.water_new : item.water_old
       }));
+      
+      // Sắp xếp tự nhiên
+      processedData.sort((a, b) => {
+          return new Intl.Collator('vi', { numeric: true, sensitivity: 'base' })
+              .compare(a.apartment_code, b.apartment_code);
+      });
 
       setData(processedData);
     } catch (error) {
-      alert("Lỗi tải chỉ số: " + error.message);
+      alert("Lỗi tải: " + error.message);
     } finally {
       setLoading(false);
     }
   };
 
+  const handleYearChange = (e) => {
+    const newYear = parseInt(e.target.value);
+    setYear(newYear);
+    if (newYear < currentYear) setMonth(12);
+    else setMonth(currentMonth);
+  };
+
+  // --- 3. HANDLERS ---
   const handleInputChange = (index, field, value) => {
     if (isLocked) return;
-
-    // [MỚI] CHẶN SỐ ÂM NGAY TẠI ĐÂY
     if (value !== '' && parseInt(value) < 0) return;
-
     const newData = [...data];
     newData[index][field] = value === '' ? '' : parseInt(value);
     setData(newData);
   };
 
-  // --- XỬ LÝ ĐỒNG HỒ QUAY VÒNG (Số Mới < Số Cũ) ---
   const validateData = () => {
-    let rolloverList = []; // Danh sách các căn nghi ngờ quay vòng
-    let errorList = [];    // Danh sách lỗi logic khác (nếu có)
-
+    let rolloverList = []; 
     data.forEach(item => {
-        // Hàm check nội bộ
         const check = (oldVal, newVal, type) => {
             if (newVal !== '' && newVal !== null && oldVal !== null) {
                 if (parseInt(newVal) < parseInt(oldVal)) {
@@ -100,199 +91,221 @@ const UsageManager = () => {
                 }
             }
         };
-
         check(item.electric_old, item.electric_new, 'Điện');
         check(item.water_old, item.water_new, 'Nước');
     });
 
-    // Nếu có trường hợp số mới < số cũ
     if (rolloverList.length > 0) {
-        const msg = 
+        return window.confirm(
             "PHÁT HIỆN ĐỒNG HỒ QUAY VÒNG (SỐ MỚI < SỐ CŨ)\n\n" +
-            "Các căn hộ sau có chỉ số mới nhỏ hơn chỉ số cũ:\n" + 
-            rolloverList.join("\n") + 
-            "\n\n- Nhấn OK: Xác nhận đây là đồng hồ quay vòng (Hệ thống sẽ tự tính bù).\n" + 
-            "- Nhấn Cancel: Để kiểm tra lại số liệu nhập.";
-        
-        return window.confirm(msg);
+            "Các căn hộ sau:\n" + rolloverList.join("\n") + 
+            "\n\nNhấn OK để xác nhận (Tính bù), Cancel để kiểm tra lại."
+        );
     }
-
     return true;
   };
 
   const handleSave = async () => {
     if (isLocked) return;
     if (!validateData()) return; 
-
-    if (debugMode && isTimeLocked) {
-        if (!window.confirm("⚠️ CẢNH BÁO DEBUG:\nBạn đang sửa dữ liệu của tháng đã qua/đã chốt.\nViệc này có thể làm sai lệch hóa đơn đã in.\nTiếp tục lưu?")) return;
-    }
-
     try {
       setLoading(true);
       await saveUsages({ month, year, data, debug: debugMode });
-      alert("✅ Đã lưu chỉ số thành công!");
+      alert("✅ Đã lưu thành công!");
       fetchData();
     } catch (error) {
-      alert("Lỗi khi lưu: " + (error.response?.data?.message || error.message));
+      alert("Lỗi lưu: " + error.message);
     } finally {
       setLoading(false);
     }
   };
 
-  // Helper check lỗi hiển thị đỏ
-  const hasError = (oldVal, newVal) => {
-    if (newVal === '' || newVal === null) return false;
-    return parseInt(newVal) < parseInt(oldVal);
+  const handleImportClick = () => fileInputRef.current.click();
+
+  const handleFileChange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('month', month);
+      formData.append('year', year);
+
+      try {
+          setLoading(true);
+          const res = await importUsages(formData); 
+          let msg = res.data?.message || "Import xong.";
+          if (res.data?.errors?.length > 0) msg += "\n\nCảnh báo:\n" + res.data.errors.join("\n");
+          alert(msg);
+          fetchData();
+      } catch (err) {
+          alert("Lỗi import: " + err.message);
+      } finally {
+          setLoading(false);
+          e.target.value = null;
+      }
   };
 
+  const hasError = (oldVal, newVal) => (newVal !== '' && newVal !== null && parseInt(newVal) < parseInt(oldVal));
+
   return (
-    <div className="p-6">
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
-        <div>
-            <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-                Cập nhật Chỉ Số Điện Nước
-                {debugMode && <Bug size={16} className="text-purple-600 animate-pulse" title="Debug Mode Active" />}
-            </h1>
-            {isTimeLocked && (
-                <div className="mt-1 flex items-center gap-2">
-                    <span className="text-sm font-bold text-red-600 bg-red-100 px-2 py-1 rounded flex items-center gap-1">
-                        <Lock size={14}/> Đã khóa sổ
-                    </span>
-                    {debugMode && <span className="text-xs text-purple-600 font-bold border border-purple-200 px-1 rounded">UNLOCKED</span>}
+    <div className="min-h-screen bg-gray-100 py-8 px-4 flex flex-col items-center">
+      
+      {/* --- MAIN CONTAINER (Giới hạn chiều rộng max-w-6xl) --- */}
+      <div className="w-full max-w-6xl space-y-4">
+        
+        {/* HEADER CARD */}
+        <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-200 flex flex-col md:flex-row justify-between items-center gap-4">
+            <div>
+                <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
+                    Cập nhật Chỉ Số
+                    {debugMode && <Bug size={20} className="text-purple-600 animate-pulse" />}
+                </h1>
+                <p className="text-sm text-gray-500 mt-1 flex items-center gap-2">
+                    {isTimeLocked 
+                        ? <span className="bg-red-100 text-red-700 px-2 py-0.5 rounded text-xs font-bold border border-red-200 flex items-center gap-1"><Lock size={12}/> Đã khóa sổ</span> 
+                        : <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-bold border border-green-200">Đang mở</span>
+                    }
+                    <span className="text-gray-400">|</span>
+                    <span>Kỳ dữ liệu: Tháng {month}/{year}</span>
+                </p>
+            </div>
+            
+            <div className="flex items-center gap-3 bg-gray-50 p-2 rounded-lg border border-gray-100">
+                <select 
+                    value={month} onChange={e => setMonth(parseInt(e.target.value))} 
+                    className="h-10 border-gray-300 border rounded-md px-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white cursor-pointer hover:border-blue-400 transition-colors"
+                >
+                    {[...Array(maxMonthToShow)].map((_, i) => (
+                        <option key={maxMonthToShow - i} value={maxMonthToShow - i}>Tháng {maxMonthToShow - i}</option>
+                    ))}
+                </select>
+
+                <select 
+                    value={year} onChange={handleYearChange} 
+                    className="h-10 border-gray-300 border rounded-md px-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white cursor-pointer hover:border-blue-400 transition-colors"
+                >
+                    {[currentYear, currentYear - 1].map(y => <option key={y} value={y}>{y}</option>)}
+                </select>
+
+                <div className="w-px h-6 bg-gray-300 mx-1"></div>
+
+                <button onClick={fetchData} className="h-10 w-10 flex items-center justify-center bg-white text-gray-600 rounded-md hover:bg-blue-50 hover:text-blue-600 border border-gray-300 transition-all" title="Làm mới">
+                    <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
+                </button>
+                
+                {!isLocked && (
+                    <>
+                        <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept=".xlsx, .xls" />
+                        <button onClick={handleImportClick} disabled={loading} className="h-10 px-4 bg-emerald-600 text-white text-sm font-medium rounded-md hover:bg-emerald-700 flex items-center gap-2 shadow-sm transition-all hover:shadow">
+                            <FileSpreadsheet size={18} /> Excel
+                        </button>
+                        <button onClick={handleSave} disabled={loading} className="h-10 px-5 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 flex items-center gap-2 shadow-md transition-all hover:shadow-lg hover:-translate-y-0.5">
+                            <Save size={18} /> Lưu Chỉ Số
+                        </button>
+                    </>
+                )}
+            </div>
+        </div>
+
+        {/* TABLE CARD */}
+        <div className="bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden flex flex-col h-[80vh]"> {/* Tăng chiều cao container */}
+            <div className="overflow-auto flex-1 custom-scrollbar">
+                <table className="w-full text-left border-collapse relative">
+                    <thead className="bg-gray-100 sticky top-0 z-20 shadow-sm text-sm">
+                        <tr>
+                            <th className="py-4 px-4 w-28 font-bold text-gray-700 sticky left-0 bg-gray-100 z-30 border-r border-b text-center tracking-wide">CĂN HỘ</th>
+                            
+                            {/* Header Điện */}
+                            <th className="py-3 px-2 text-center bg-yellow-50/80 text-yellow-800 border-r border-b border-yellow-200 backdrop-blur-sm" colSpan={2}>
+                                <div className="flex items-center justify-center gap-2 font-bold text-base">⚡ ĐIỆN (kWh)</div>
+                            </th>
+                            
+                            {/* Header Nước */}
+                            <th className="py-3 px-2 text-center bg-blue-50/80 text-blue-800 border-b border-blue-200 backdrop-blur-sm" colSpan={2}>
+                                <div className="flex items-center justify-center gap-2 font-bold text-base">💧 NƯỚC (m³)</div>
+                            </th>
+                        </tr>
+                        <tr className="text-xs uppercase text-gray-500 font-bold bg-gray-50 border-b border-gray-200">
+                            <th className="sticky left-0 bg-gray-50 z-30 border-r"></th>
+                            <th className="py-2 px-4 text-center border-r w-1/5 tracking-wider">Số cũ</th>
+                            <th className="py-2 px-4 text-center border-r w-1/5 tracking-wider bg-yellow-50/30">Số mới</th>
+                            <th className="py-2 px-4 text-center border-r w-1/5 tracking-wider">Số cũ</th>
+                            <th className="py-2 px-4 text-center w-1/5 tracking-wider bg-blue-50/30">Số mới</th>
+                        </tr>
+                    </thead>
+                    
+                    <tbody className="divide-y divide-gray-100 text-sm">
+                        {loading && data.length === 0 ? (
+                            <tr><td colSpan="5" className="p-20 text-center text-gray-400 text-lg">Đang tải dữ liệu...</td></tr>
+                        ) : data.length === 0 ? (
+                            <tr><td colSpan="5" className="p-20 text-center text-gray-400 italic text-lg">Không có dữ liệu hiển thị.</td></tr>
+                        ) : (
+                            data.map((item, index) => (
+                                <tr key={item.apartment_id} className="hover:bg-gray-50 transition-colors group">
+                                    {/* Căn hộ */}
+                                    <td className="py-3 px-4 font-bold text-gray-700 sticky left-0 bg-white border-r z-10 text-center shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)] group-hover:bg-gray-50 text-base">
+                                        {item.apartment_code}
+                                    </td>
+                                    
+                                    {/* Điện Cũ */}
+                                    <td className="py-3 px-4 text-center text-gray-500 border-r text-base font-mono">
+                                        {item.electric_old}
+                                    </td>
+                                    {/* Điện Mới */}
+                                    <td className={`p-2 border-r relative ${isLocked ? 'bg-gray-50' : 'bg-yellow-50/10'}`}>
+                                        <input 
+                                            type="number" min="0" disabled={isLocked}
+                                            className={`w-full h-10 px-3 rounded border text-center font-bold text-lg text-gray-800 outline-none transition-all
+                                                ${isLocked 
+                                                    ? 'bg-transparent border-transparent cursor-not-allowed text-gray-500' 
+                                                    : 'bg-white border-gray-200 focus:border-yellow-400 focus:ring-4 focus:ring-yellow-100 hover:border-yellow-300'
+                                                }
+                                                ${!isLocked && hasError(item.electric_old, item.electric_new) ? '!bg-red-50 !text-red-600 !border-red-300 !ring-red-100' : ''}
+                                            `}
+                                            placeholder="..."
+                                            value={item.electric_new === 0 ? '0' : (item.electric_new || '')} 
+                                            onChange={(e) => handleInputChange(index, 'electric_new', e.target.value)}
+                                            onWheel={(e) => e.target.blur()}
+                                        />
+                                    </td>
+
+                                    {/* Nước Cũ */}
+                                    <td className="py-3 px-4 text-center text-gray-500 border-r text-base font-mono">
+                                        {item.water_old}
+                                    </td>
+                                    {/* Nước Mới */}
+                                    <td className={`p-2 relative ${isLocked ? 'bg-gray-50' : 'bg-blue-50/10'}`}>
+                                        <input 
+                                            type="number" min="0" disabled={isLocked}
+                                            className={`w-full h-10 px-3 rounded border text-center font-bold text-lg text-gray-800 outline-none transition-all
+                                                ${isLocked 
+                                                    ? 'bg-transparent border-transparent cursor-not-allowed text-gray-500' 
+                                                    : 'bg-white border-gray-200 focus:border-blue-400 focus:ring-4 focus:ring-blue-100 hover:border-blue-300'
+                                                }
+                                                ${!isLocked && hasError(item.water_old, item.water_new) ? '!bg-red-50 !text-red-600 !border-red-300 !ring-red-100' : ''}
+                                            `}
+                                            placeholder="..."
+                                            value={item.water_new === 0 ? '0' : (item.water_new || '')} 
+                                            onChange={(e) => handleInputChange(index, 'water_new', e.target.value)}
+                                            onWheel={(e) => e.target.blur()}
+                                        />
+                                    </td>
+                                </tr>
+                            ))
+                        )}
+                    </tbody>
+                </table>
+            </div>
+
+            {/* Footer Status */}
+            {!isLocked && (
+                <div className="px-6 py-3 bg-gray-50 border-t text-sm text-gray-600 flex gap-6 items-center shadow-inner">
+                    <span className="font-semibold flex items-center gap-2"><AlertCircle size={16} className="text-blue-600"/> Trạng thái nhập liệu:</span>
+                    <div className="flex items-center gap-2"><span className="w-3 h-3 bg-white border border-gray-300 rounded-full"></span> Bình thường</div>
+                    <div className="flex items-center gap-2"><span className="w-3 h-3 bg-red-100 border border-red-500 rounded-full"></span> Cảnh báo (Số mới &lt; Số cũ)</div>
                 </div>
             )}
         </div>
-        
-        <div className="flex gap-2">
-           <select 
-                value={month} 
-                onChange={e => setMonth(parseInt(e.target.value))} 
-                className="border p-2 rounded bg-white shadow-sm focus:ring-2 focus:ring-blue-500 outline-none"
-            >
-                {[...Array(maxMonthToShow)].map((_, i) => {
-                    const monthValue = maxMonthToShow - i;
-                    return <option key={monthValue} value={monthValue}>Tháng {monthValue}</option>;
-                })}
-            </select>
-
-            <select 
-                value={year} 
-                onChange={handleYearChange} 
-                className="border p-2 rounded bg-white shadow-sm focus:ring-2 focus:ring-blue-500 outline-none"
-            >
-                {[currentYear, currentYear - 1, currentYear - 2].map(y => (
-                    <option key={y} value={y}>{y}</option>
-                ))}
-            </select>
-
-          <button onClick={fetchData} className="px-3 py-2 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 flex items-center gap-2 border">
-            <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
-            <span className="hidden md:inline">Làm mới</span>
-          </button>
-          
-          {!isLocked && (
-            <button 
-                onClick={handleSave} 
-                disabled={loading}
-                className={`px-4 py-2 text-white rounded flex items-center gap-2 shadow-sm font-medium disabled:bg-blue-300 ${
-                    debugMode && isTimeLocked ? 'bg-purple-600 hover:bg-purple-700' : 'bg-blue-600 hover:bg-blue-700'
-                }`}
-            >
-                <Save size={18} /> {debugMode && isTimeLocked ? 'Lưu Đè (Debug)' : 'Lưu Chỉ Số'}
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div className="bg-white rounded-lg shadow border border-gray-200 overflow-hidden">
-        <div className="overflow-x-auto max-h-[70vh]">
-          <table className="w-full text-left border-collapse">
-            <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10 shadow-sm">
-              <tr>
-                <th className="p-2 w-24 font-semibold text-gray-700 sticky left-0 bg-gray-50 z-20 border-r text-center">Căn hộ</th>
-                <th className="p-4 text-center bg-yellow-100 text-yellow-800 border-r" colSpan={2}>⚡ ĐIỆN (kWh)</th>
-                <th className="p-4 text-center bg-blue-100 text-blue-800" colSpan={2}>💧 NƯỚC (m3)</th>
-              </tr>
-              <tr className="text-xs uppercase text-gray-500 font-bold bg-gray-100">
-                <th className="p-2 w-24 sticky left-0 bg-gray-100 z-20 border-r"></th>
-                <th className="p-2 text-center border-r w-1/4">Số cũ</th>
-                <th className="p-2 text-center border-r w-1/4">Số mới</th>
-                <th className="p-2 text-center border-r w-1/4">Số cũ</th>
-                <th className="p-2 text-center w-1/4">Số mới</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {loading && data.length === 0 ? (
-                <tr><td colSpan="5" className="p-10 text-center text-gray-500">Đang tải dữ liệu...</td></tr>
-              ) : data.length === 0 ? (
-                <tr><td colSpan="5" className="p-10 text-center text-gray-400 italic">Không có dữ liệu căn hộ.</td></tr>
-              ) : (
-                data.map((item, index) => (
-                  <tr key={item.apartment_id} className="hover:bg-gray-50 transition-colors">
-                    <td className="p-2 w-24 font-bold text-gray-700 sticky left-0 bg-white border-r z-10 text-center shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">
-                        {item.apartment_code}
-                    </td>
-                    
-                    {/* CỘT ĐIỆN */}
-                    <td className="p-3 text-center bg-yellow-50/50 border-r text-gray-500 font-mono text-lg">
-                        {item.electric_old}
-                    </td>
-                    <td className={`p-2 bg-yellow-50/30 border-r ${isLocked ? 'bg-gray-100' : ''}`}>
-                        <input 
-                            type="number" 
-                            min="0" // [MỚI] Chặn số âm ở trình duyệt
-                            disabled={isLocked}
-                            className={`w-full border p-2 rounded text-center font-bold text-lg focus:ring-2 outline-none transition-all
-                                ${isLocked ? 'bg-gray-100 text-gray-500 cursor-not-allowed border-gray-200' : ''}
-                                ${!isLocked && hasError(item.electric_old, item.electric_new) 
-                                    ? 'border-red-500 bg-red-50 text-red-600 focus:ring-red-400' 
-                                    : !isLocked ? 'border-gray-300 focus:ring-yellow-400 focus:border-yellow-400 text-blue-700' : ''
-                                }`}
-                            placeholder={isLocked ? '-' : '...'}
-                            value={item.electric_new === 0 ? '0' : (item.electric_new || '')} 
-                            onChange={(e) => handleInputChange(index, 'electric_new', e.target.value)}
-                            onWheel={(e) => e.target.blur()}
-                        />
-                    </td>
-
-                    {/* CỘT NƯỚC */}
-                    <td className="p-3 text-center bg-blue-50/50 border-r text-gray-500 font-mono text-lg">
-                        {item.water_old}
-                    </td>
-                    <td className={`p-2 bg-blue-50/30 ${isLocked ? 'bg-gray-100' : ''}`}>
-                        <input 
-                            type="number"
-                            min="0" // [MỚI] Chặn số âm ở trình duyệt
-                            disabled={isLocked}
-                            className={`w-full border p-2 rounded text-center font-bold text-lg focus:ring-2 outline-none transition-all
-                                ${isLocked ? 'bg-gray-100 text-gray-500 cursor-not-allowed border-gray-200' : ''}
-                                ${!isLocked && hasError(item.water_old, item.water_new) 
-                                    ? 'border-red-500 bg-red-50 text-red-600 focus:ring-red-400' 
-                                    : !isLocked ? 'border-gray-300 focus:ring-blue-400 focus:border-blue-400 text-blue-700' : ''
-                                }`}
-                            placeholder={isLocked ? '-' : '...'}
-                            value={item.water_new === 0 ? '0' : (item.water_new || '')} 
-                            onChange={(e) => handleInputChange(index, 'water_new', e.target.value)}
-                            onWheel={(e) => e.target.blur()}
-                        />
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-        
-        {!isLocked && (
-            <div className="p-4 bg-gray-50 border-t text-sm text-gray-500 flex gap-4 items-center justify-between">
-                <div className="flex gap-4">
-                    <div className="flex items-center gap-1"><AlertCircle size={16}/> Lưu ý:</div>
-                    <div className="flex items-center gap-1"><span className="w-3 h-3 bg-red-50 border border-red-500 block"></span> Ô màu đỏ: Số mới &lt; Số cũ (Có thể là quay vòng đồng hồ)</div>
-                </div>
-                {debugMode && <div className="text-purple-600 font-bold">MODE: DEBUGGING</div>}
-            </div>
-        )}
       </div>
     </div>
   );

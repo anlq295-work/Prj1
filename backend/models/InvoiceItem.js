@@ -1,24 +1,33 @@
-const { DataTypes } = require('sequelize');
-const sequelize = require('../config/database');
+module.exports = (sequelize, DataTypes) => {
+  const InvoiceItem = sequelize.define('InvoiceItem', {
+    id: {
+      type: DataTypes.INTEGER,
+      primaryKey: true,
+      autoIncrement: true
+    },
+    invoice_id: {
+      type: DataTypes.INTEGER,
+      references: { model: 'invoices', key: 'id' }
+    },
+    fee_definition_id: {
+      type: DataTypes.INTEGER,
+      references: { model: 'fee_definitions', key: 'id' }
+    },
+    description: DataTypes.STRING,
+    quantity: {
+      type: DataTypes.DECIMAL(10, 2),
+      defaultValue: 1
+    },
+    unit_price: DataTypes.DECIMAL(15, 2),
+    amount: {
+      type: DataTypes.DECIMAL(15, 2),
+      allowNull: false
+    },
+    metadata: DataTypes.JSONB // Lưu chi tiết tính toán (ví dụ các bậc thang)
+  }, {
+    tableName: 'invoice_items',
+    timestamps: false
+  });
 
-const InvoiceItem = sequelize.define('InvoiceItem', {
-  id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
-  invoice_id: { type: DataTypes.INTEGER, allowNull: false },
-  fee_type_id: { type: DataTypes.INTEGER },
-  
-  fee_name: { type: DataTypes.STRING, allowNull: false },
-  description: { type: DataTypes.STRING },
-  
-  // Quan trọng: Numeric cho tiền nong
-  quantity: { type: DataTypes.DECIMAL(10, 2), defaultValue: 1 },
-  unit_price: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
-  amount: { type: DataTypes.DECIMAL(15, 2), allowNull: false },
-  
-  details: { type: DataTypes.JSONB }
-}, {
-  tableName: 'invoice_items',
-  underscored: true, // Để map invoiceId (JS) -> invoice_id (DB) nếu cần, nhưng ta đã khai báo rõ ở trên
-  timestamps: false
-});
-
-module.exports = InvoiceItem;
+  return InvoiceItem;
+};

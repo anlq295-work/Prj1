@@ -1,85 +1,93 @@
-const sequelize = require('../config/database');
-const { DataTypes } = require('sequelize');
+const { Sequelize, DataTypes } = require('sequelize');
 
-// 1. Import Models (SỬA LẠI: Bỏ gọi hàm)
-const Apartment = require('./Apartment');
-const Household = require('./Household');
-const FeeType = require('./FeeType'); // Đã sửa theo mẫu bạn gửi
-const FeeConfig = require('./FeeConfig');
-const BillingPeriod = require('./BillingPeriod');
-const MeterReading = require('./MeterReading'); // Đảm bảo file này cũng viết đúng chuẩn
-const Invoice = require('./Invoice');
-const InvoiceItem = require('./InvoiceItem');
-const Payment = require('./Payment');
-const User = require('./User');
-const UserProfile = require('./UserProfile');
+// Đảm bảo đường dẫn này trỏ đúng tới file database.js bạn vừa gửi
+// Nếu database.js nằm cùng thư mục models, hãy sửa thành: require('./database');
+const sequelize = require('../config/database'); 
 
-// 2. Thiết lập Quan hệ (Associations)
+const db = {};
+
+db.Sequelize = Sequelize;
+db.sequelize = sequelize;
+
+// ====================================================
+// 1. IMPORT MODELS (Gọi hàm để khởi tạo Model)
+// ====================================================
+
+// Auth & User
+db.User = require('./User')(sequelize, DataTypes);
+db.UserProfile = require('./UserProfile')(sequelize, DataTypes);
+
+// Core Entities
+db.Apartment = require('./Apartment')(sequelize, DataTypes);
+db.Household = require('./Household')(sequelize, DataTypes);
+
+// Fee & Meter (Cấu trúc mới: FeeDefinition thay thế FeeType/Config)
+db.FeeDefinition = require('./FeeDefinition')(sequelize, DataTypes); 
+db.MeterReading = require('./MeterReading')(sequelize, DataTypes);
+
+// Invoice & Payment (Cấu trúc mới: Bỏ BillingPeriod)
+db.Invoice = require('./Invoice')(sequelize, DataTypes);
+db.InvoiceItem = require('./InvoiceItem')(sequelize, DataTypes);
+// Nếu bạn chưa tạo file Payment.js theo chuẩn mới, hãy comment dòng dưới lại
+// db.Payment = require('./Payment')(sequelize, DataTypes); 
+
+// ====================================================
+// 2. THIẾT LẬP QUAN HỆ (ASSOCIATIONS)
+// ====================================================
 
 // --- User & Profile ---
-User.hasOne(UserProfile, { foreignKey: 'user_id' });
-UserProfile.belongsTo(User, { foreignKey: 'user_id' });
+db.User.hasOne(db.UserProfile, { foreignKey: 'user_id', as: 'Profile' });
+db.UserProfile.belongsTo(db.User, { foreignKey: 'user_id', as: 'User' });
 
-// --- Căn hộ & Hộ dân ---
-Apartment.hasMany(Household, { foreignKey: 'apartment_id' });
-Household.belongsTo(Apartment, { foreignKey: 'apartment_id' });
+// --- Apartment & Household ---
+db.Apartment.hasMany(db.Household, { foreignKey: 'apartment_id', as: 'Households' });
+db.Household.belongsTo(db.Apartment, { foreignKey: 'apartment_id', as: 'Apartment' });
 
-// --- Phí ---
-FeeType.hasMany(FeeConfig, { foreignKey: 'fee_type_id' });
-FeeConfig.belongsTo(FeeType, { foreignKey: 'fee_type_id' });
+// --- User & Household ---
+db.User.hasMany(db.Household, { foreignKey: 'user_id', as: 'Households' });
+db.Household.belongsTo(db.User, { foreignKey: 'user_id', as: 'Representative' });
 
-// --- Chỉ số (MeterReading) ---
-Apartment.hasMany(MeterReading, { foreignKey: 'apartment_id' });
-MeterReading.belongsTo(Apartment, { foreignKey: 'apartment_id' });
+// --- Household & Invoice ---
+db.Household.hasMany(db.Invoice, { foreignKey: 'household_id', as: 'Invoices' });
+db.Invoice.belongsTo(db.Household, { foreignKey: 'household_id', as: 'Household' });
 
-BillingPeriod.hasMany(MeterReading, { foreignKey: 'billing_period_id' });
-MeterReading.belongsTo(BillingPeriod, { foreignKey: 'billing_period_id' });
+// --- Invoice & InvoiceItem ---
+db.Invoice.hasMany(db.InvoiceItem, { foreignKey: 'invoice_id', as: 'Items', onDelete: 'CASCADE' });
+db.InvoiceItem.belongsTo(db.Invoice, { foreignKey: 'invoice_id', as: 'Invoice' });
 
-FeeType.hasMany(MeterReading, { foreignKey: 'fee_type_id' });
-MeterReading.belongsTo(FeeType, { foreignKey: 'fee_type_id' });
+// --- FeeDefinition & InvoiceItem ---
+db.FeeDefinition.hasMany(db.InvoiceItem, { foreignKey: 'fee_definition_id', as: 'InvoiceItems' });
+db.InvoiceItem.belongsTo(db.FeeDefinition, { foreignKey: 'fee_definition_id', as: 'FeeDefinition' });
 
-// --- Biên lai (Invoice) ---
-Household.hasMany(Invoice, { foreignKey: 'household_id' });
-Invoice.belongsTo(Household, { foreignKey: 'household_id' });
+// --- FeeDefinition & MeterReading ---
+db.FeeDefinition.hasMany(db.MeterReading, { foreignKey: 'fee_definition_id', as: 'Readings' });
+db.MeterReading.belongsTo(db.FeeDefinition, { foreignKey: 'fee_definition_id', as: 'FeeDefinition' });
 
-Apartment.hasMany(Invoice, { foreignKey: 'apartment_id' });
-Invoice.belongsTo(Apartment, { foreignKey: 'apartment_id' });
+// --- Apartment & MeterReading ---
+db.Apartment.hasMany(db.MeterReading, { foreignKey: 'apartment_id', as: 'MeterReadings' });
+db.MeterReading.belongsTo(db.Apartment, { foreignKey: 'apartment_id', as: 'Apartment' });
 
-BillingPeriod.hasMany(Invoice, { foreignKey: 'billing_period_id' });
-Invoice.belongsTo(BillingPeriod, { foreignKey: 'billing_period_id' });
+// --- Invoice & Payment ---
+// Cần model Payment để lưu lịch sử trả tiền vì cột paid_amount ở Invoice đã mất
+if (db.Payment) {
+    db.Invoice.hasMany(db.Payment, { foreignKey: 'invoice_id', as: 'Payments' });
+    db.Payment.belongsTo(db.Invoice, { foreignKey: 'invoice_id', as: 'Invoice' });
+}
 
-// --- Chi tiết Biên lai ---
-Invoice.hasMany(InvoiceItem, { foreignKey: 'invoice_id', as: 'InvoiceItems', onDelete: 'CASCADE' });
-InvoiceItem.belongsTo(Invoice, { foreignKey: 'invoice_id' });
-
-FeeType.hasMany(InvoiceItem, { foreignKey: 'fee_type_id' });
-InvoiceItem.belongsTo(FeeType, { foreignKey: 'fee_type_id' });
-
-// --- Thanh toán ---
-Invoice.hasMany(Payment, { foreignKey: 'invoice_id' });
-Payment.belongsTo(Invoice, { foreignKey: 'invoice_id' });
-
-// 3. Export
-module.exports = {
-  sequelize,
-  Apartment,
-  Household,
-  FeeType,
-  FeeConfig,
-  BillingPeriod,
-  MeterReading,
-  Invoice,
-  InvoiceItem,
-  Payment,
-  User,
-  UserProfile,
-  
-  syncDB: async () => {
+// ====================================================
+// 3. HÀM ĐỒNG BỘ CSDL (SYNC)
+// ====================================================
+db.syncDB = async () => {
     try {
-      await sequelize.authenticate();
-      console.log('✅ Kết nối CSDL thành công.');
+        await sequelize.authenticate();
+        console.log('✅ Kết nối CSDL thành công.');
+        
+        // Dùng alter: true để tự động sửa bảng nếu có thay đổi cột (DEV MODE)
+        // await sequelize.sync({ alter: true }); 
+        // console.log('✅ Đã đồng bộ Model với Database.');
     } catch (error) {
-      console.error('❌ Kết nối thất bại:', error);
+        console.error('❌ Kết nối thất bại:', error);
     }
-  }
 };
+
+module.exports = db;

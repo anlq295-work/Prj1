@@ -1,14 +1,28 @@
-const { DataTypes } = require('sequelize');
-const sequelize = require('../config/database');
+module.exports = (sequelize, DataTypes) => {
+  const Apartment = sequelize.define('Apartment', {
+    id: {
+      type: DataTypes.INTEGER,
+      primaryKey: true,
+      autoIncrement: true
+    },
+    code: {
+      type: DataTypes.STRING,
+      allowNull: false,
+      unique: true
+    },
+    area: {
+      type: DataTypes.DECIMAL(10, 2), // Numeric
+      allowNull: false
+    },
+    status: {
+      type: DataTypes.STRING,
+      defaultValue: 'ACTIVE'
+    }
+  }, {
+    tableName: 'apartments',
+    underscored: true,
+    timestamps: true
+  });
 
-const Apartment = sequelize.define('Apartment', {
-  id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
-  code: { type: DataTypes.STRING, allowNull: false, unique: true }, 
-  area: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0 }, // Dùng Decimal cho diện tích
-}, {
-  tableName: 'apartments', // Tên bảng chuẩn snake_case
-  underscored: true,       // Tự động map createdAt -> created_at
-  timestamps: true
-});
-
-module.exports = Apartment;
+  return Apartment;
+};

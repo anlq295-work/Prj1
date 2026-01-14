@@ -1,131 +1,163 @@
-const { sequelize, Invoice, InvoiceItem, Apartment, Household, FeeConfig, FeeType, MeterReading, BillingPeriod, Payment } = require('../models');
+const { sequelize, Invoice, InvoiceItem, Apartment, Household, FeeDefinition, MeterReading, Payment } = require('../models');
 const { Op } = require('sequelize');
 const { calculateTieredFee } = require('../services/BillCalculator');
 
 // ==========================================
-// 1. TÍNH PHÍ THÁNG
+// 1. TÍNH PHÍ THÁNG (Tạo Invoice Draft)
 // ==========================================
 exports.generateInvoices = async (req, res) => {
-    const { month, year, confirm_recalc, debug } = req.body;
+    const { month, year, debug } = req.body;
     const t = await sequelize.transaction();
 
     try {
-        console.log(`--- BẮT ĐẦU TÍNH PHÍ THÁNG ${month}/${year}${debug ? ' [DEBUG MODE]' : ''} ---`);
+        console.log(`--- TÍNH PHÍ THÁNG ${month}/${year} ---`);
 
-        const [period] = await BillingPeriod.findOrCreate({
-            where: { month, year },
-            defaults: { status: 'OPEN', month, year },
-            transaction: t
-        });
-
-        if (period.status === 'CLOSED' && !debug) {
-            await t.rollback();
-            return res.status(403).json({ message: "Kỳ thu này ĐÃ CHỐT SỔ." });
-        }
-
+        // 1. Lấy danh sách căn hộ & Hộ dân (Kèm số dư ví)
         const occupiedApartments = await Apartment.findAll({
-            include: [{ model: Household, where: { status: 'ACTIVE' }, required: true }],
+            include: [{ 
+                model: Household, 
+                as: 'Households', 
+                where: { status: 'ACTIVE' }, 
+                required: true 
+            }],
             transaction: t
         });
 
-        const activeConfigs = await FeeConfig.findAll({
-            where: { is_active: true },
-            include: [{ model: FeeType }],
+        // 2. Lấy danh sách TẤT CẢ các loại phí định kỳ (để xóa sạch dữ liệu cũ)
+        const allRecurringFees = await FeeDefinition.findAll({
+            attributes: ['id'],
+            where: { category: { [Op.ne]: 'OTHER' } },
             transaction: t
         });
-        
-        const monthlyFeeTypeIds = activeConfigs.map(c => c.fee_type_id).filter(id => id);
+        const allRecurringFeeIds = allRecurringFees.map(f => f.id);
+
+        // 3. Lấy danh sách phí ĐANG HOẠT ĐỘNG (để tính mới)
+        const activeFees = await FeeDefinition.findAll({
+            where: { is_active: true, category: { [Op.ne]: 'OTHER' } },
+            transaction: t
+        });
 
         let countCreated = 0;
-        let countUpdated = 0;
 
         for (const apt of occupiedApartments) {
             const household = apt.Households[0]; 
 
-            const existingInvoices = await Invoice.findAll({
-                where: {
-                    household_id: household.id,
-                    billing_period_id: period.id,
-                    status: { [Op.ne]: 'PAID' }
-                },
+            // Tìm/Tạo Invoice Header
+            let [invoice, created] = await Invoice.findOrCreate({
+                where: { household_id: household.id, month, year },
+                defaults: { status: 'DRAFT', total_amount: 0 },
                 transaction: t
             });
 
-            let monthlyInvoice = null;
-            for (const inv of existingInvoices) {
-                const hasMonthlyItem = await InvoiceItem.findOne({
-                    where: { invoice_id: inv.id, fee_type_id: { [Op.in]: monthlyFeeTypeIds } },
-                    transaction: t
-                });
-                if (hasMonthlyItem) { monthlyInvoice = inv; break; }
+            // Nếu đã chốt sổ (và không phải debug) thì bỏ qua
+            if (!debug && ['PAID', 'ISSUED'].includes(invoice.status)) continue;
+            if (created) countCreated++;
+
+            // --- A. XÓA DỮ LIỆU CŨ ---
+            // 1. Hoàn lại tiền ví nếu hóa đơn cũ đã trừ tiền ví (tránh trừ 2 lần)
+            const oldDeduction = await InvoiceItem.findOne({
+                where: { invoice_id: invoice.id, unit_price: { [Op.lt]: 0 } }, // Tìm item âm
+                transaction: t
+            });
+            if (oldDeduction) {
+                const refundAmount = Math.abs(parseFloat(oldDeduction.amount));
+                await household.increment('balance', { by: refundAmount, transaction: t });
+                await oldDeduction.destroy({ transaction: t });
             }
 
-            let isNew = false;
-            if (!monthlyInvoice) {
-                monthlyInvoice = await Invoice.create({
-                    household_id: household.id, billing_period_id: period.id, apartment_id: apt.id,
-                    total_amount: 0, status: 'DRAFT', owner_name: household.representative_name
-                }, { transaction: t });
-                isNew = true; countCreated++;
-            } else { countUpdated++; }
+            // 2. Xóa các khoản phí định kỳ cũ
+            if (allRecurringFeeIds.length > 0) {
+                await InvoiceItem.destroy({
+                    where: { 
+                        invoice_id: invoice.id, 
+                        fee_definition_id: { [Op.in]: allRecurringFeeIds } 
+                    },
+                    transaction: t
+                });
+            }
 
-            await InvoiceItem.destroy({
-                where: { invoice_id: monthlyInvoice.id, fee_type_id: { [Op.in]: monthlyFeeTypeIds } },
-                transaction: t
-            });
+            // --- B. TÍNH TOÁN PHÍ MỚI ---
+            for (const fee of activeFees) {
+                let amount = 0, quantity = 0, description = '', details = null;
 
-            for (const config of activeConfigs) {
-                const feeType = config.FeeType; 
-                if (!feeType) continue;
-
-                let amount = 0; let quantity = 0; let details = null; let description = '';
-
-                if (config.calc_method === 'FIXED') {
-                    if (feeType.unit === 'm2') {
-                        quantity = apt.area || 0; amount = parseFloat(config.unit_price) * parseFloat(quantity); description = `Diện tích: ${quantity} m2`;
-                    } else {
-                        quantity = 1; amount = parseFloat(config.unit_price); description = 'Phí trọn gói';
-                    }
-                } else if (config.calc_method === 'TIERED') {
+                if (fee.calc_method === 'FIXED') {
+                    quantity = 1;
+                    amount = parseFloat(fee.unit_price);
+                    description = 'Phí cố định hàng tháng';
+                } 
+                else if (fee.calc_method === 'BY_AREA') {
+                    // Lấy diện tích an toàn
+                    quantity = parseFloat(apt.area || 0);
+                    const price = parseFloat(fee.unit_price || 0);
+                    amount = Math.round(quantity * price); // Làm tròn
+                    description = `Diện tích: ${quantity} m²`;
+                }
+                else if (['BY_METER', 'TIERED'].includes(fee.calc_method)) {
                     const reading = await MeterReading.findOne({
-                        where: { apartment_id: apt.id, billing_period_id: period.id, fee_type_id: feeType.id },
+                        where: { apartment_id: apt.id, fee_definition_id: fee.id, month, year },
                         transaction: t
                     });
-                    if (reading) {
-                        quantity = reading.new_value - reading.old_value; 
-                        
-                        // Xử lý đồng hồ quay vòng
-                        if (quantity < 0) {
-                            let maxReading = feeType.unit?.toLowerCase() === 'm3' ? 99999 : 999999; 
-                            quantity = (maxReading + 1 - reading.old_value) + reading.new_value;
-                            description = `Quay vòng: ${reading.old_value} -> ${reading.new_value}`;
-                        } else {
-                            description = `Tiêu thụ: ${quantity} ${feeType.unit}`;
-                        }
 
-                        const result = calculateTieredFee(quantity, config.tier_config);
-                        amount = result.total; details = result.breakdown; 
+                    if (reading) {
+                        quantity = Number(reading.new_value) - Number(reading.old_value);
+                        if (quantity < 0) quantity = 0;
+
+                        description = `Tiêu thụ: ${quantity} ${fee.unit}`;
+                        if (fee.calc_method === 'TIERED') {
+                            const result = calculateTieredFee(quantity, fee.tier_config);
+                            amount = result.total;
+                            details = result.breakdown;
+                        } else {
+                            amount = quantity * parseFloat(fee.unit_price);
+                        }
                     }
                 }
 
                 if (amount > 0) {
                     await InvoiceItem.create({
-                        invoice_id: monthlyInvoice.id, fee_type_id: feeType.id, fee_name: config.name,
-                        unit_price: config.calc_method === 'FIXED' ? config.unit_price : 0, quantity: quantity, amount: amount, details: details, description: description
+                        invoice_id: invoice.id,
+                        fee_definition_id: fee.id,
+                        description, quantity,
+                        unit_price: fee.calc_method !== 'TIERED' ? fee.unit_price : 0,
+                        amount, metadata: details
                     }, { transaction: t });
                 }
             }
+
+            // --- C. KHẤU TRỪ SỐ DƯ VÍ (NẾU CÓ) ---
+            // Tính tổng tiền tạm thời
+            const currentTotal = await InvoiceItem.sum('amount', { where: { invoice_id: invoice.id }, transaction: t }) || 0;
             
-            const totalResult = await InvoiceItem.sum('amount', { where: { invoice_id: monthlyInvoice.id }, transaction: t });
-            monthlyInvoice.total_amount = totalResult || 0;
-            await monthlyInvoice.save({ transaction: t });
+            // Reload household để lấy balance mới nhất (sau khi hoàn tiền ở bước A.1)
+            await household.reload({ transaction: t });
+            const currentBalance = parseFloat(household.balance || 0);
+
+            if (currentBalance > 0 && currentTotal > 0) {
+                // Trừ tối đa bằng tổng tiền hóa đơn hoặc số dư ví
+                const deductionAmount = Math.min(currentTotal, currentBalance);
+                
+                // Tạo item âm để trừ tiền
+                await InvoiceItem.create({
+                    invoice_id: invoice.id,
+                    description: `Sử dụng số dư ví (Còn lại: ${(currentBalance - deductionAmount).toLocaleString()}đ)`,
+                    quantity: 1,
+                    unit_price: -deductionAmount,
+                    amount: -deductionAmount,
+                    // Có thể tạo 1 loại phí hệ thống 'WALLET' nếu cần, ở đây để null hoặc OTHER
+                }, { transaction: t });
+
+                // Trừ tiền trong ví
+                await household.decrement('balance', { by: deductionAmount, transaction: t });
+            }
+
+            // --- D. CẬP NHẬT TỔNG TIỀN CUỐI CÙNG ---
+            const finalTotal = await InvoiceItem.sum('amount', { where: { invoice_id: invoice.id }, transaction: t });
+            invoice.total_amount = finalTotal || 0;
+            await invoice.save({ transaction: t });
         }
 
         await t.commit();
-        res.json({ 
-            message: `Tính phí tháng thành công! ${debug ? '(Debug Mode)' : ''}`,
-            details: `Đã tạo ${countCreated}, cập nhật ${countUpdated}.`
-        });
+        res.json({ message: "Tính phí thành công!", details: `Đã xử lý ${occupiedApartments.length} căn hộ.` });
 
     } catch (err) {
         await t.rollback();
@@ -135,219 +167,350 @@ exports.generateInvoices = async (req, res) => {
 };
 
 // ==========================================
-// 2. API: TÌM KIẾM BIÊN LAI (ADMIN)
+// 2. TÌM KIẾM HÓA ĐƠN (ADMIN)
 // ==========================================
 exports.searchInvoices = async (req, res) => {
     const { code, month, year } = req.query;
     try {
-        const period = await BillingPeriod.findOne({ where: { month, year } });
-        let whereClause = {};
-        let currentStatus = period ? period.status : 'OPEN'; 
+        const whereClause = {};
+        if (month) whereClause.month = month;
+        if (year) whereClause.year = year;
 
-        if (period) whereClause.billing_period_id = period.id;
-        else return res.json({ data: [], status: 'OPEN' });
+        const householdInclude = {
+            model: Household,
+            as: 'Household',
+            include: []
+        };
+
+        if (code) {
+            householdInclude.include.push({
+                model: Apartment,
+                as: 'Apartment',
+                where: { code: { [Op.iLike]: `%${code}%` } },
+                required: true 
+            });
+        } else {
+            householdInclude.include.push({
+                model: Apartment,
+                as: 'Apartment'
+            });
+        }
 
         const invoices = await Invoice.findAll({
             where: whereClause,
             include: [
-                { model: Household, as: 'Household', include: [{ model: Apartment, as: 'Apartment', where: code ? { code: { [Op.iLike]: `%${code}%` } } : {} }] },
-                { model: InvoiceItem, as: 'InvoiceItems', include: [{ model: FeeType }] }
+                householdInclude,
+                { 
+                    model: InvoiceItem, 
+                    as: 'Items', 
+                    include: [{ model: FeeDefinition, as: 'FeeDefinition' }] 
+                }
             ],
-            order: [[{ model: Household, as: 'Household' }, { model: Apartment, as: 'Apartment' }, 'code', 'ASC']]
+            order: [
+                [ { model: Household, as: 'Household' }, { model: Apartment, as: 'Apartment' }, 'code', 'ASC' ]
+            ]
         });
 
-        const results = invoices
-            .filter(inv => inv.Household && inv.Household.Apartment) 
-            .map(inv => ({
-                id: inv.id, 
-                apartment_code: inv.Household.Apartment.code, 
-                owner_name: inv.Household.owner_name,
-                month: month, 
-                year: year, 
-                total_amount: inv.total_amount, 
-                status: inv.status, 
-                items: inv.InvoiceItems,
-                // [FIX LỖI NGÀY LẬP] Thêm createdAt vào đây
-                createdAt: inv.createdAt,
-                updatedAt: inv.updatedAt
-            }));
+        const result = invoices.map(inv => ({
+            id: inv.id,
+            apartment_code: inv.Household?.Apartment?.code || 'N/A',
+            owner_name: inv.Household?.owner_name,
+            month: inv.month,
+            year: inv.year,
+            total_amount: inv.total_amount,
+            status: inv.status,
+            issued_at: inv.issued_at,
+            createdAt: inv.createdAt,
+            items: inv.Items
+        }));
 
-        res.json({ data: results, status: currentStatus });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+        res.json({ data: result });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 };
 
 // ==========================================
-// 3. API: PHÁT HÀNH BIÊN LAI
+// 3. CHỐT SỔ (PUBLISH)
 // ==========================================
 exports.publishInvoices = async (req, res) => {
     const { month, year } = req.body;
-    const t = await sequelize.transaction();
     try {
-        const period = await BillingPeriod.findOne({ where: { month, year }, transaction: t });
-        if (!period) { await t.rollback(); return res.status(404).json({ message: "Chưa có kỳ thu." }); }
-
-        period.status = 'CLOSED';
-        await period.save({ transaction: t });
-
         const [count] = await Invoice.update(
-            { status: 'PENDING' }, 
-            { where: { billing_period_id: period.id, status: 'DRAFT' }, transaction: t }
+            { status: 'ISSUED', issued_at: new Date() },
+            { where: { month, year, status: 'DRAFT' } }
         );
-        await t.commit();
-        res.json({ message: `Đã chốt sổ thành công! ${count} hóa đơn đã được phát hành.` });
-    } catch (err) { await t.rollback(); res.status(500).json({ error: err.message }); }
+        res.json({ message: `Đã phát hành ${count} hóa đơn.` });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 };
 
 // ==========================================
-// 4. API: THÊM PHÍ LẺ
+// 4. THÊM PHÍ LẺ (AD-HOC)
 // ==========================================
 exports.addAdHocItem = async (req, res) => {
     const { apartment_codes, fee_name, amount, description, month, year } = req.body;
-    const timeStamp = new Date().toLocaleString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
     const t = await sequelize.transaction();
 
     try {
-        if (!apartment_codes || apartment_codes.length === 0) {
-            await t.rollback(); return res.status(400).json({ message: "Chưa chọn căn hộ." });
+        let otherFee = await FeeDefinition.findOne({ where: { category: 'OTHER' } });
+        if (!otherFee) {
+            otherFee = await FeeDefinition.create({ 
+                name: 'Phí khác', category: 'OTHER', calc_method: 'FIXED', unit: 'Lần' 
+            }, { transaction: t });
         }
 
-        const [period] = await BillingPeriod.findOrCreate({
-            where: { month, year },
-            defaults: { status: 'OPEN', month, year },
-            transaction: t
-        });
-
-        const monthlyConfigs = await FeeConfig.findAll({ include: [{ model: FeeType }], transaction: t });
-        const monthlyFeeTypeIds = monthlyConfigs.map(c => c.fee_type_id).filter(id => id);
-
-        let genericFeeType = await FeeType.findOne({ where: { category: 'OTHER' } });
-        if (!genericFeeType) {
-            genericFeeType = await FeeType.create({ name: 'Phí phát sinh khác', category: 'OTHER', unit: 'Lần' }, { transaction: t });
-        }
-
-        let successCount = 0;
-
+        let count = 0;
         for (const code of apartment_codes) {
-            const cleanCode = code.trim();
-            const apartment = await Apartment.findOne({ where: { code: { [Op.iLike]: cleanCode } } });
-            if (!apartment) continue;
+            const apt = await Apartment.findOne({ where: { code: code.trim() } });
+            if (!apt) continue;
 
-            const household = await Household.findOne({ where: { apartment_id: apartment.id, status: 'ACTIVE' } });
+            const household = await Household.findOne({ where: { apartment_id: apt.id, status: 'ACTIVE' } });
             if (!household) continue;
 
-            const existingInvoices = await Invoice.findAll({
-                where: { household_id: household.id, billing_period_id: period.id, status: { [Op.ne]: 'PAID' } },
-                transaction: t
+            let invoice = await Invoice.findOne({ 
+                where: { household_id: household.id, month, year }, 
+                transaction: t 
             });
-
-            let adHocInvoice = null;
-            for (const inv of existingInvoices) {
-                const hasMonthlyItem = await InvoiceItem.findOne({
-                    where: { invoice_id: inv.id, fee_type_id: { [Op.in]: monthlyFeeTypeIds } },
-                    transaction: t
-                });
-                if (!hasMonthlyItem) { adHocInvoice = inv; break; }
+            
+            if (!invoice) {
+                 invoice = await Invoice.create({
+                     household_id: household.id, month, year, status: 'DRAFT'
+                 }, { transaction: t });
             }
 
-            if (!adHocInvoice) {
-                adHocInvoice = await Invoice.create({
-                    household_id: household.id, billing_period_id: period.id, apartment_id: apartment.id,
-                    total_amount: 0, status: 'PENDING', payment_method: 'CASH', owner_name: household.representative_name
-                }, { transaction: t });
-            }
+            if (invoice.status === 'PAID') continue;
 
-            const itemAmount = parseFloat(amount);
+            const val = parseFloat(amount);
             await InvoiceItem.create({
-                invoice_id: adHocInvoice.id, fee_type_id: genericFeeType.id, fee_name: fee_name,
-                unit_price: itemAmount, quantity: 1, amount: itemAmount,
-                description: description ? `${description} (${timeStamp})` : `Thêm lúc ${timeStamp}`
+                invoice_id: invoice.id,
+                fee_definition_id: otherFee.id,
+                description: description || fee_name,
+                quantity: 1, unit_price: val, amount: val
             }, { transaction: t });
 
-            await adHocInvoice.increment('total_amount', { by: itemAmount, transaction: t });
-            successCount++;
+            await invoice.increment('total_amount', { by: val, transaction: t });
+            count++;
         }
 
         await t.commit();
-        res.json({ message: `Đã thêm phí lẻ cho ${successCount} căn.` });
-
-    } catch (err) { await t.rollback(); res.status(500).json({ error: err.message }); }
+        res.json({ message: `Đã thêm phí cho ${count} căn hộ.` });
+    } catch (err) {
+        await t.rollback();
+        res.status(500).json({ error: err.message });
+    }
 };
 
 // ==========================================
-// 5. CÁC HÀM CRUD KHÁC
+// 5. CẬP NHẬT CHI TIẾT HÓA ĐƠN
 // ==========================================
 exports.updateInvoice = async (req, res) => {
-    const { id } = req.params; const { items } = req.body;
+    const { id } = req.params;
+    const { items, deletedIds } = req.body; 
     const t = await sequelize.transaction();
+
     try {
         const invoice = await Invoice.findByPk(id);
-        if (!invoice || invoice.status === 'PAID') throw new Error("Không thể sửa.");
-        let newTotal = 0;
-        for (const item of items) {
-            if (item.id) {
-                await InvoiceItem.update({ quantity: item.quantity, unit_price: item.unit_price, amount: item.amount, fee_name: item.fee_name, description: item.description }, { where: { id: item.id }, transaction: t });
-                newTotal += parseFloat(item.amount);
+        if (!invoice || invoice.status === 'PAID') {
+            await t.rollback();
+            return res.status(400).json({ message: "Không thể sửa hóa đơn đã thanh toán." });
+        }
+
+        // 1. Xử lý xóa items
+        if (deletedIds && deletedIds.length > 0) {
+            await InvoiceItem.destroy({
+                where: {
+                    id: { [Op.in]: deletedIds },
+                    invoice_id: invoice.id 
+                },
+                transaction: t
+            });
+        }
+
+        // 2. Cập nhật / Thêm mới items
+        if (items && items.length > 0) {
+            for (const item of items) {
+                if (item.id) {
+                    // Update
+                    const invoiceItem = await InvoiceItem.findByPk(item.id, { transaction: t });
+                    if (invoiceItem && invoiceItem.invoice_id === invoice.id) {
+                        invoiceItem.quantity = item.quantity;
+                        invoiceItem.unit_price = item.unit_price;
+                        invoiceItem.amount = item.amount;
+                        invoiceItem.description = item.description;
+                        if (item.fee_name) invoiceItem.description = item.fee_name; // Fallback
+                        await invoiceItem.save({ transaction: t });
+                    }
+                } else {
+                    // Create new
+                    let feeDefId = item.fee_definition_id;
+                    if (!feeDefId) {
+                        const otherFee = await FeeDefinition.findOne({ where: { category: 'OTHER' } });
+                        feeDefId = otherFee ? otherFee.id : null;
+                    }
+                    if (feeDefId) {
+                        await InvoiceItem.create({
+                            invoice_id: invoice.id,
+                            fee_definition_id: feeDefId,
+                            description: item.fee_name || item.description || 'Phí phát sinh',
+                            quantity: item.quantity,
+                            unit_price: item.unit_price,
+                            amount: item.amount
+                        }, { transaction: t });
+                    }
+                }
             }
         }
-        invoice.total_amount = newTotal;
+
+        // 3. Tính lại tổng tiền
+        const newTotal = await InvoiceItem.sum('amount', { where: { invoice_id: invoice.id }, transaction: t });
+        invoice.total_amount = newTotal || 0;
         await invoice.save({ transaction: t });
-        await t.commit(); res.json({ message: "OK" });
-    } catch (err) { await t.rollback(); res.status(500).json({ error: err.message }); }
+
+        await t.commit();
+        res.json({ message: "Cập nhật thành công", total_amount: newTotal });
+    } catch (err) {
+        await t.rollback();
+        res.status(500).json({ error: err.message });
+    }
 };
 
+// ==========================================
+// 6. XÓA HÓA ĐƠN & HOÀN TIỀN VÍ
+// ==========================================
 exports.deleteInvoice = async (req, res) => {
-    const { id } = req.params; const t = await sequelize.transaction();
+    const { id } = req.params;
+    const t = await sequelize.transaction();
     try {
-        const invoice = await Invoice.findByPk(id);
-        if (!invoice || invoice.status === 'PAID') { await t.rollback(); return res.status(400).json({message: "Lỗi"}); }
+        const invoice = await Invoice.findByPk(id, { include: ['Items', 'Household'] });
+        if (!invoice) { await t.rollback(); return res.status(404).json({message: "Not found"}); }
+        if (invoice.status === 'PAID') { await t.rollback(); return res.status(400).json({message: "Đã thanh toán, không thể xóa."}); }
+
+        // 1. Kiểm tra xem có mục nào trừ tiền ví (số âm) không để hoàn tiền
+        const deductionItem = invoice.Items.find(item => item.amount < 0 && item.description.includes('số dư ví'));
+        if (deductionItem) {
+            const refundAmount = Math.abs(parseFloat(deductionItem.amount));
+            await invoice.Household.increment('balance', { by: refundAmount, transaction: t });
+        }
+
+        // 2. Xóa
         await InvoiceItem.destroy({ where: { invoice_id: id }, transaction: t });
         await invoice.destroy({ transaction: t });
-        await t.commit(); res.json({ message: "OK" });
-    } catch (err) { await t.rollback(); res.status(500).json({ error: err.message }); }
+
+        await t.commit();
+        res.json({ message: "Đã xóa hóa đơn và hoàn lại số dư ví (nếu có)." });
+    } catch (err) {
+        await t.rollback();
+        res.status(500).json({ error: err.message });
+    }
 };
 
-exports.payInvoice = async (req, res) => {
-    const { id } = req.params; const t = await sequelize.transaction();
-    try {
-        const invoice = await Invoice.findByPk(id);
-        if (!invoice || invoice.status === 'PAID') { await t.rollback(); return res.status(400).json({message: "Lỗi"}); }
-        invoice.status = 'PAID'; invoice.paid_amount = invoice.total_amount; invoice.payment_method = 'CASH';
-        await invoice.save({ transaction: t });
-        await Payment.create({ invoice_id: id, amount: invoice.total_amount, method: 'CASH', paid_at: new Date(), transaction_code: 'ADMIN_MANUAL' }, { transaction: t });
-        await t.commit(); res.json({ message: "OK" });
-    } catch (err) { await t.rollback(); res.status(500).json({ error: err.message }); }
-};
-
+// ==========================================
+// 7. PUBLIC API: GET (Dân xem)
+// ==========================================
 exports.getPublicInvoices = async (req, res) => {
     const { code } = req.query;
     try {
-        const apartment = await Apartment.findOne({ where: { code } });
-        if (!apartment) return res.status(404).json({ message: "Không tìm thấy" });
-        const invoices = await Invoice.findAll({
-            where: { apartment_id: apartment.id, status: { [Op.in]: ['PENDING', 'PAID'] } },
-            include: [{ model: Household, as: 'Household' }, { model: InvoiceItem, as: 'InvoiceItems', include: [{ model: FeeType }] }, { model: BillingPeriod }],
-            order: [[ { model: BillingPeriod }, 'year', 'DESC'], [ { model: BillingPeriod }, 'month', 'DESC']]
+        const apt = await Apartment.findOne({ 
+            where: { code },
+            include: [{ model: Household, as: 'Households', where: { status: 'ACTIVE' } }]
         });
-        res.json(invoices.map(inv => ({
-            id: inv.id, apartment_code: code, owner_name: inv.Household?.owner_name,
-            month: inv.BillingPeriod?.month, year: inv.BillingPeriod?.year,
-            total_amount: inv.total_amount, status: inv.status, items: inv.InvoiceItems,
-            // [FIX LỖI NGÀY LẬP] Thêm createdAt vào đây
-            createdAt: inv.createdAt,
-            updatedAt: inv.updatedAt
-        })));
-    } catch (err) { res.status(500).json({ error: err.message }); }
+        
+        if (!apt || !apt.Households[0]) return res.status(404).json({ message: "Không tìm thấy thông tin." });
+
+        const invoices = await Invoice.findAll({
+            where: { 
+                household_id: apt.Households[0].id, 
+                status: { [Op.in]: ['ISSUED', 'PAID', 'PARTIAL'] } 
+            },
+            include: [
+                { model: InvoiceItem, as: 'Items', include: [{ model: FeeDefinition, as: 'FeeDefinition' }] }
+            ],
+            order: [['year', 'DESC'], ['month', 'DESC']]
+        });
+        res.json(invoices);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 };
 
+// ==========================================
+// 8. THANH TOÁN (ADMIN) - XỬ LÝ TIỀN THỪA
+// ==========================================
+exports.payInvoice = async (req, res) => {
+    const { id } = req.params;
+    const { amount_received } = req.body; // Số tiền thực nhận
+    const t = await sequelize.transaction();
+    try {
+        const inv = await Invoice.findByPk(id, { include: ['Household'] });
+        if(!inv) return res.status(404).json({message: "Not found"});
+        
+        const totalToPay = parseFloat(inv.total_amount);
+        const received = parseFloat(amount_received || totalToPay); // Mặc định trả đủ
+
+        // 1. Update trạng thái
+        inv.status = 'PAID';
+        inv.paid_at = new Date();
+        await inv.save({ transaction: t });
+        
+        // 2. Xử lý tiền thừa vào Ví
+        let note = '';
+        if (received > totalToPay) {
+            const surplus = received - totalToPay;
+            await inv.Household.increment('balance', { by: surplus, transaction: t });
+            note = `Thừa ${surplus.toLocaleString()}đ nạp ví.`;
+        }
+
+        // 3. Tạo Payment Log
+        if (Payment) {
+            await Payment.create({
+                invoice_id: id,
+                amount: received,
+                method: 'CASH',
+                paid_at: new Date(),
+                transaction_code: 'ADMIN_MANUAL',
+                note: note
+            }, { transaction: t });
+        }
+        
+        await t.commit();
+        res.json({ message: "Thanh toán thành công" + (note ? `. ${note}` : "") });
+    } catch(err) {
+        await t.rollback();
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// ==========================================
+// 9. THANH TOÁN ONLINE (PUBLIC)
+// ==========================================
 exports.publicPayInvoice = async (req, res) => {
-    const { id } = req.params; const { payment_method } = req.body;
+    const { id } = req.params;
+    const { payment_method } = req.body;
     const t = await sequelize.transaction();
     try {
         const invoice = await Invoice.findByPk(id);
-        if (!invoice || invoice.status === 'PAID') { await t.rollback(); return res.status(400).json({message: "Lỗi"}); }
-        invoice.status = 'PAID'; invoice.paid_amount = invoice.total_amount; invoice.payment_method = payment_method || 'TRANSFER';
+        if (!invoice) return res.status(404).json({ message: "Not found" });
+        if (invoice.status === 'PAID') return res.status(400).json({ message: "Đã thanh toán rồi" });
+
+        invoice.status = 'PAID';
+        invoice.paid_at = new Date();
         await invoice.save({ transaction: t });
-        await Payment.create({ invoice_id: id, amount: invoice.total_amount, method: payment_method, paid_at: new Date() }, { transaction: t });
-        await t.commit(); res.json({ message: "OK" });
-    } catch (err) { await t.rollback(); res.status(500).json({ error: err.message }); }
+
+        if (Payment) {
+            await Payment.create({
+                invoice_id: id,
+                amount: invoice.total_amount,
+                method: payment_method || 'TRANSFER',
+                paid_at: new Date()
+            }, { transaction: t });
+        }
+
+        await t.commit();
+        res.json({ message: "Thanh toán thành công" });
+    } catch (err) {
+        await t.rollback();
+        res.status(500).json({ error: err.message });
+    }
 };

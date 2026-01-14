@@ -1,18 +1,25 @@
-const { DataTypes } = require('sequelize');
-const sequelize = require('../config/database');
-
-const UserProfile = sequelize.define('UserProfile', {
-    id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
-    // userId tự động qua quan hệ
-    full_name: { type: DataTypes.STRING },     // Sửa từ fullName
-    phone_number: { type: DataTypes.STRING },  // Sửa từ phoneNumber
-    email: { type: DataTypes.STRING },
-    identity_card: { type: DataTypes.STRING }, // Sửa từ identityCard
-    avatar_url: { type: DataTypes.STRING }     // Sửa từ avatarUrl
-}, {
+module.exports = (sequelize, DataTypes) => {
+  const UserProfile = sequelize.define('UserProfile', {
+    id: {
+      type: DataTypes.INTEGER,
+      primaryKey: true,
+      autoIncrement: true
+    },
+    user_id: {
+      type: DataTypes.INTEGER,
+      unique: true,
+      references: { model: 'users', key: 'id' }
+    },
+    full_name: DataTypes.STRING,
+    phone: DataTypes.STRING,
+    email: DataTypes.STRING,
+    identity_card: DataTypes.STRING,
+    avatar_url: DataTypes.TEXT
+  }, {
     tableName: 'user_profiles',
     underscored: true,
     timestamps: true
-});
+  });
 
-module.exports = UserProfile;
+  return UserProfile;
+};

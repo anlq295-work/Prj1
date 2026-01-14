@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Trash2, RefreshCw, Plus, Calculator, Lock, Bug } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Trash2, RefreshCw, Plus, Calculator, Lock, Bug, Search, Filter } from 'lucide-react';
 import { 
     generateInvoices, 
     searchInvoices, 
@@ -14,72 +14,45 @@ const BillingManager = () => {
   const currentMonth = now.getMonth() + 1;
   const currentYear = now.getFullYear();
 
-  // State
+  // --- STATE DỮ LIỆU ---
   const [month, setMonth] = useState(currentMonth);
   const [year, setYear] = useState(currentYear);
   const [invoices, setInvoices] = useState([]);
   const [loading, setLoading] = useState(false);
-  
-  // [HIDDEN STATE] Chế độ Debug (Mặc định tắt)
+  const [periodStatus, setPeriodStatus] = useState('OPEN');
   const [debugMode, setDebugMode] = useState(false);
 
-  // [NEW] State lưu trạng thái thực của kỳ thu từ DB
-  const [periodStatus, setPeriodStatus] = useState('OPEN');
+  // --- STATE TÌM KIẾM & BỘ LỌC (MỚI) ---
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterType, setFilterType] = useState('ALL'); // ALL, HAS_ADHOC, ONLY_MONTHLY
 
-  // Modal State
+  // --- MODAL STATE ---
   const [selectedInvoice, setSelectedInvoice] = useState(null);
   const [showAdHocModal, setShowAdHocModal] = useState(false);
   const [adHocForm, setAdHocForm] = useState({ apartment_codes: '', fee_name: '', amount: 0, description: '' });
 
   const maxMonthToShow = (year === currentYear) ? currentMonth : 12;
 
-  // --- 1. LẮNG NGHE PHÍM TẮT (SECRET HOTKEY) ---
+  // --- 1. HOTKEY DEBUG ---
   useEffect(() => {
     const handleKeyDown = (event) => {
-        // Tổ hợp phím: Ctrl + Shift + D
         if (event.ctrlKey && event.shiftKey && (event.key === 'D' || event.key === 'd')) {
             event.preventDefault();
             setDebugMode(prev => {
                 const newState = !prev;
-                alert(newState 
-                    ? "🔓 ĐÃ BẬT CHẾ ĐỘ DEBUG (DEVELOPER)\n- Cho phép tính lại phí khi đã chốt sổ.\n- Hãy cẩn thận khi thao tác." 
-                    : "🔒 ĐÃ TẮT CHẾ ĐỘ DEBUG"
-                );
+                alert(newState ? "🔓 DEBUG MODE ON" : "🔒 DEBUG MODE OFF");
                 return newState;
             });
         }
     };
-
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // --- 2. LOGIC HIỂN THỊ ---
-  const safeInvoices = Array.isArray(invoices) ? invoices : [];
-  
-  // Dùng status chính xác từ DB để xác định đã chốt chưa
-  const isPeriodClosed = periodStatus === 'CLOSED';
-  
-  // Logic hiển thị nút:
-  // - Tạm tính: Hiện khi (Chưa chốt) HOẶC (Đã chốt nhưng đang bật Debug Mode)
-  const showCalculate = !isPeriodClosed || debugMode; 
-  
-  // - Chốt sổ: Hiện khi (Chưa chốt) VÀ (Đã có dữ liệu nháp)
-  const showPublish = !isPeriodClosed && safeInvoices.length > 0;
-  
-  // - Phí lẻ: Luôn cho phép
-  const canAddFee = true; 
-
+  // --- 2. LOGIC LOAD DỮ LIỆU ---
   useEffect(() => {
     handleSearch();
   }, [month, year]);
-
-  const handleYearChange = (e) => {
-    const newYear = parseInt(e.target.value);
-    setYear(newYear);
-    if (newYear < currentYear) setMonth(12);
-    else if (newYear === currentYear) setMonth(currentMonth);
-  };
 
   const handleSearch = async () => {
     setLoading(true);
@@ -87,14 +60,11 @@ const BillingManager = () => {
       const res = await searchInvoices({ month, year });
       const responseData = res.data;
 
-      // Xử lý dữ liệu trả về từ Backend (dạng { data: [], status: '...' })
       if (responseData && Array.isArray(responseData.data)) {
           setInvoices(responseData.data);
-          setPeriodStatus(responseData.status); // Cập nhật status chuẩn
+          setPeriodStatus(responseData.status);
       } else if (Array.isArray(responseData)) {
-          // Fallback nếu backend trả về mảng cũ
           setInvoices(responseData);
-          // Đoán status (không chính xác bằng DB nhưng tạm được)
           const isClosed = responseData.some(inv => inv.status === 'PENDING' || inv.status === 'PAID');
           setPeriodStatus(isClosed ? 'CLOSED' : 'OPEN');
       } else {
@@ -109,15 +79,48 @@ const BillingManager = () => {
     }
   };
 
-  const handleCalculate = async () => {
-    // Cảnh báo nếu đang dùng Debug Mode trên kỳ thu đã đóng
-    if (debugMode && isPeriodClosed) {
-        if (!window.confirm("⚠️ CẢNH BÁO DEBUG:\nKỳ thu này ĐÃ CHỐT SỔ.\nViệc tính lại có thể làm thay đổi số liệu các hóa đơn đã phát hành (cư dân có thể đã nhìn thấy).\n\nBạn có chắc chắn muốn tiếp tục?")) return;
-    }
+  // --- 3. LOGIC LỌC DỮ LIỆU (MỚI) ---
+  const filteredInvoices = useMemo(() => {
+    if (!Array.isArray(invoices)) return [];
 
+    return invoices.filter(inv => {
+        // 1. Tìm kiếm theo Mã căn hoặc Tên chủ hộ
+        const searchLower = searchTerm.toLowerCase();
+        const matchText = 
+            (inv.apartment_code || '').toLowerCase().includes(searchLower) ||
+            (inv.owner_name || '').toLowerCase().includes(searchLower);
+
+        // 2. Phân loại phí (Dựa vào items trong hóa đơn)
+        // Lưu ý: Backend cần trả về items kèm FeeDefinition để logic này hoạt động chính xác
+        let matchType = true;
+        
+        // Kiểm tra xem hóa đơn có mục phí "OTHER" (Phí khác/Phí lẻ) hay không
+        const hasAdHoc = inv.items?.some(item => item.FeeDefinition?.category === 'OTHER');
+        
+        if (filterType === 'HAS_ADHOC') {
+            matchType = hasAdHoc; // Chỉ hiện căn có phí phát sinh
+        } else if (filterType === 'ONLY_MONTHLY') {
+            matchType = !hasAdHoc; // Chỉ hiện căn KHÔNG có phí phát sinh
+        }
+
+        return matchText && matchType;
+    });
+  }, [invoices, searchTerm, filterType]);
+
+  // --- 4. CÁC HÀM XỬ LÝ HÀNH ĐỘNG ---
+  const handleYearChange = (e) => {
+    const newYear = parseInt(e.target.value);
+    setYear(newYear);
+    if (newYear < currentYear) setMonth(12);
+    else if (newYear === currentYear) setMonth(currentMonth);
+  };
+
+  const handleCalculate = async () => {
+    if (debugMode && periodStatus === 'CLOSED') {
+        if (!window.confirm("⚠️ CẢNH BÁO DEBUG: Đang tính lại trên kỳ đã chốt!")) return;
+    }
     setLoading(true);
     try {
-      // Gửi tham số debug: true xuống Backend
       const res = await generateInvoices({ month, year, debug: debugMode });
       alert("✅ " + res.data.message);
       handleSearch();
@@ -129,7 +132,7 @@ const BillingManager = () => {
   };
 
   const handlePublish = async () => {
-    if(!window.confirm(`Bạn đang thực hiện CHỐT SỔ tháng ${month}/${year}.\nHành động này sẽ khóa kỳ thu.\nTiếp tục?`)) return;
+    if(!window.confirm(`Chốt sổ tháng ${month}/${year}?`)) return;
     setLoading(true);
     try {
       const res = await publishInvoices(month, year);
@@ -139,8 +142,7 @@ const BillingManager = () => {
   };
 
   const handleDelete = async (id) => {
-    // Cho phép xóa nếu (Chưa chốt sổ và chưa thanh toán) HOẶC (Đang Debug Mode)
-    if(!confirm("Bạn chắc chắn muốn xóa khoản thu này?")) return;
+    if(!confirm("Xóa khoản thu này?")) return;
     try { await deleteInvoice(id); handleSearch(); } catch(e) { alert(e.message); }
   };
 
@@ -156,24 +158,27 @@ const BillingManager = () => {
       } catch (err) { alert("Lỗi: " + (err.response?.data?.message || err.message)); }
   };
 
+  const isPeriodClosed = periodStatus === 'CLOSED';
+  const showCalculate = !isPeriodClosed || debugMode; 
+  const showPublish = !isPeriodClosed && invoices.length > 0;
+
   return (
-    <div className="p-6">
+    <div className="p-6 bg-gray-50 min-h-screen">
+      {/* HEADER & TOOLBAR */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
         <div>
             <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
                 Quản lý Biên Lai
-                {/* Chỉ hiện icon Bug khi Debug Mode đang bật */}
                 {debugMode && (
-                    <span className="text-purple-600 bg-purple-100 px-2 py-0.5 rounded text-xs border border-purple-300 flex items-center gap-1 animate-pulse" title="Developer Mode Active">
+                    <span className="text-purple-600 bg-purple-100 px-2 py-0.5 rounded text-xs border border-purple-300 flex items-center gap-1 animate-pulse">
                         <Bug size={14}/> DEV MODE
                     </span>
                 )}
             </h1>
-            
             <div className="flex items-center gap-2 mt-1">
                 {isPeriodClosed ? (
                     <span className="text-sm font-bold text-red-600 bg-red-100 px-2 py-1 rounded flex items-center gap-1">
-                        <Lock size={14}/> ĐÃ CHỐT SỔ (Phí tháng)
+                        <Lock size={14}/> ĐÃ CHỐT SỔ
                     </span>
                 ) : (
                     <span className="text-sm font-bold text-green-600 bg-green-100 px-2 py-1 rounded">
@@ -183,28 +188,18 @@ const BillingManager = () => {
             </div>
         </div>
         
+        {/* ACTION BUTTONS */}
         <div className="flex flex-wrap gap-2">
-            <select value={month} onChange={e => setMonth(parseInt(e.target.value))} className="border p-2 rounded bg-white shadow-sm outline-none">
+            <select value={month} onChange={e => setMonth(parseInt(e.target.value))} className="border p-2 rounded bg-white shadow-sm outline-none font-medium">
                 {[...Array(maxMonthToShow)].map((_, i) => <option key={maxMonthToShow - i} value={maxMonthToShow - i}>Tháng {maxMonthToShow - i}</option>)}
             </select>
-            <select value={year} onChange={handleYearChange} className="border p-2 rounded bg-white shadow-sm outline-none">
+            <select value={year} onChange={handleYearChange} className="border p-2 rounded bg-white shadow-sm outline-none font-medium">
                 {[currentYear, currentYear - 1].map(y => <option key={y} value={y}>{y}</option>)}
             </select>
-            <button onClick={handleSearch} className="px-3 py-2 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 border"><RefreshCw size={18}/></button>
-
-            {/* NÚT TẠM TÍNH */}
+            
             {showCalculate && (
-                <button 
-                    onClick={handleCalculate} 
-                    disabled={loading}
-                    className={`px-3 py-2 text-white rounded flex items-center gap-2 shadow-sm ${
-                        debugMode && isPeriodClosed 
-                        ? 'bg-purple-600 hover:bg-purple-700 ring-2 ring-purple-300' // Màu tím khi Debug ép tính
-                        : 'bg-blue-600 hover:bg-blue-700'
-                    }`}
-                    title={debugMode && isPeriodClosed ? "Chế độ Debug: Ép tính lại khi đã chốt" : "Tính phí hàng tháng"}
-                >
-                    <Calculator size={18} /> {debugMode && isPeriodClosed ? 'Ép Tính Lại' : 'Tạm tính'}
+                <button onClick={handleCalculate} disabled={loading} className={`px-3 py-2 text-white rounded flex items-center gap-2 shadow-sm ${debugMode && isPeriodClosed ? 'bg-purple-600 hover:bg-purple-700 ring-2 ring-purple-300' : 'bg-blue-600 hover:bg-blue-700'}`}>
+                    <Calculator size={18} /> {debugMode && isPeriodClosed ? 'Ép Tính' : 'Tạm tính'}
                 </button>
             )}
 
@@ -214,15 +209,42 @@ const BillingManager = () => {
                 </button>
             )}
 
-            {canAddFee && (
-                <button onClick={() => setShowAdHocModal(true)} disabled={loading} className="px-3 py-2 bg-orange-500 text-white rounded hover:bg-orange-600 flex items-center gap-2 shadow-sm">
-                    <Plus size={18} /> Phí Lẻ
-                </button>
-            )}
+            <button onClick={() => setShowAdHocModal(true)} disabled={loading} className="px-3 py-2 bg-orange-500 text-white rounded hover:bg-orange-600 flex items-center gap-2 shadow-sm">
+                <Plus size={18} /> Phí Lẻ
+            </button>
         </div>
       </div>
 
-      {/* TABLE */}
+      {/* SEARCH & FILTER BAR (MỚI) */}
+      <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-200 mb-4 flex flex-wrap gap-4 items-center">
+         {/* Tìm kiếm */}
+         <div className="relative flex-1 min-w-[200px]">
+             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+             <input 
+                 type="text" 
+                 placeholder="Tìm mã căn, chủ hộ..." 
+                 value={searchTerm} 
+                 onChange={(e) => setSearchTerm(e.target.value)}
+                 className="w-full pl-10 pr-4 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+             />
+         </div>
+
+         {/* Bộ lọc loại phí */}
+         <div className="relative min-w-[220px]">
+             <Filter className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
+             <select 
+                 value={filterType} 
+                 onChange={(e) => setFilterType(e.target.value)}
+                 className="w-full pl-9 pr-4 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white appearance-none cursor-pointer"
+             >
+                 <option value="ALL">Tất cả biên lai</option>
+                 <option value="ONLY_MONTHLY">Chỉ phí hàng tháng</option>
+                 <option value="HAS_ADHOC">Có phí khác/Phát sinh</option>
+             </select>
+         </div>
+      </div>
+
+      {/* DATA TABLE */}
       <div className="bg-white rounded-lg shadow border border-gray-200 overflow-hidden">
         <div className="overflow-x-auto">
             <table className="w-full text-left">
@@ -230,6 +252,7 @@ const BillingManager = () => {
                     <tr>
                         <th className="p-4 font-semibold text-gray-700">Căn hộ</th>
                         <th className="p-4 font-semibold text-gray-700">Chủ hộ</th>
+                        <th className="p-4 font-semibold text-gray-700">Chi tiết phí</th>
                         <th className="p-4 font-semibold text-gray-700 text-right">Tổng tiền</th>
                         <th className="p-4 font-semibold text-gray-700 text-center">Trạng thái</th>
                         <th className="p-4 font-semibold text-gray-700 text-right">Hành động</th>
@@ -237,48 +260,65 @@ const BillingManager = () => {
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                     {loading ? (
-                        <tr><td colSpan="5" className="p-10 text-center text-gray-500">Đang tải dữ liệu...</td></tr>
-                    ) : safeInvoices.length === 0 ? (
+                        <tr><td colSpan="6" className="p-10 text-center text-gray-500">Đang tải dữ liệu...</td></tr>
+                    ) : filteredInvoices.length === 0 ? (
                         <tr>
-                            <td colSpan="5" className="p-10 text-center text-gray-400 italic">
-                                {isPeriodClosed ? "Kỳ thu này không có dữ liệu." : "Chưa có biên lai nào. Hãy bấm 'Tạm tính'."}
+                            <td colSpan="6" className="p-10 text-center text-gray-400 italic">
+                                {searchTerm || filterType !== 'ALL' 
+                                    ? "Không tìm thấy kết quả phù hợp bộ lọc." 
+                                    : "Không có dữ liệu biên lai."}
                             </td>
                         </tr>
                     ) : (
-                        safeInvoices.map(inv => (
-                            <tr key={inv.id} className="hover:bg-blue-50/50 transition-colors">
-                                <td className="p-4 font-bold text-gray-800">{inv.apartment_code}</td>
-                                <td className="p-4 text-gray-600">{inv.owner_name}</td>
-                                <td className="p-4 text-right font-bold text-blue-700">{parseFloat(inv.total_amount).toLocaleString()} đ</td>
-                                <td className="p-4 text-center">
-                                    <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
-                                        inv.status === 'PAID' ? 'bg-green-100 text-green-700' : 
-                                        inv.status === 'PENDING' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'
-                                    }`}>
-                                        {inv.status === 'PAID' ? 'Đã thanh toán' : 
-                                         inv.status === 'PENDING' ? 'Chờ thanh toán' : 'Nháp'}
-                                    </span>
-                                </td>
-                                <td className="p-4 text-right">
-                                    <div className="flex justify-end items-center gap-3">
-                                        <button onClick={() => setSelectedInvoice(inv)} className="text-blue-600 font-medium hover:text-blue-800">Chi tiết</button>
-                                        
-                                        {/* Logic xóa: Cho phép nếu (Chưa thanh toán) VÀ ((Chưa chốt sổ) HOẶC (Debug Mode ON)) */}
-                                        {inv.status !== 'PAID' && (!isPeriodClosed || debugMode) && (
-                                            <button onClick={() => handleDelete(inv.id)} className="text-gray-400 hover:text-red-600 p-1"><Trash2 size={18} /></button>
-                                        )}
-                                    </div>
-                                </td>
-                            </tr>
-                        ))
+                        filteredInvoices.map(inv => {
+                            // Kiểm tra nhanh xem có phí khác không để hiện badge
+                            const hasAdHoc = inv.items?.some(item => item.FeeDefinition?.category === 'OTHER');
+                            
+                            return (
+                                <tr key={inv.id} className="hover:bg-blue-50/50 transition-colors">
+                                    <td className="p-4 font-bold text-gray-800">{inv.apartment_code}</td>
+                                    <td className="p-4 text-gray-600">{inv.owner_name}</td>
+                                    <td className="p-4">
+                                        <div className="flex gap-1">
+                                            <span className="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded border">Cố định</span>
+                                            {hasAdHoc && (
+                                                <span className="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded border border-orange-200 font-semibold">
+                                                    + Phí khác
+                                                </span>
+                                            )}
+                                        </div>
+                                    </td>
+                                    <td className="p-4 text-right font-bold text-blue-700">{parseFloat(inv.total_amount).toLocaleString()} đ</td>
+                                    <td className="p-4 text-center">
+                                        <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
+                                            inv.status === 'PAID' ? 'bg-green-100 text-green-700' : 
+                                            inv.status === 'PENDING' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'
+                                        }`}>
+                                            {inv.status === 'PAID' ? 'Đã thanh toán' : 
+                                             inv.status === 'PENDING' ? 'Chờ thanh toán' : 'Nháp'}
+                                        </span>
+                                    </td>
+                                    <td className="p-4 text-right">
+                                        <div className="flex justify-end items-center gap-3">
+                                            <button onClick={() => setSelectedInvoice(inv)} className="text-blue-600 font-medium hover:text-blue-800">Chi tiết</button>
+                                            {inv.status !== 'PAID' && (!isPeriodClosed || debugMode) && (
+                                                <button onClick={() => handleDelete(inv.id)} className="text-gray-400 hover:text-red-600 p-1"><Trash2 size={18} /></button>
+                                            )}
+                                        </div>
+                                    </td>
+                                </tr>
+                            );
+                        })
                     )}
                 </tbody>
             </table>
         </div>
       </div>
       
+      {/* MODAL CHI TIẾT */}
       {selectedInvoice && <RoomBillDetail invoice={selectedInvoice} onClose={() => setSelectedInvoice(null)} onRefresh={handleSearch} />}
       
+      {/* MODAL PHÍ LẺ (GIỮ NGUYÊN) */}
       {showAdHocModal && (
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
               <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
